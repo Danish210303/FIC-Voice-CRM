@@ -26,6 +26,11 @@ class Settings(BaseSettings):
     PLIVO_AUTH_ID: str = "MAZMI2Y2Y5NJATNWE1ZC"
     PLIVO_AUTH_TOKEN: str = "YmFiYmVjMGItMjQzNS00YWVjLTVkODctZTQzOWU3"
     BASE_URL: str = "https://ai-voice-agent-crm.onrender.com"
+    CLOUDINARY_CLOUD_NAME: str = "forge-crm"
+    CLOUDINARY_API_KEY: str = ""
+    CLOUDINARY_API_SECRET: str = ""
+    CLOUDINARY_URL: str = ""
+    CLOUDINARY_FOLDER: str = "fic_voice_recordings"
 
     class Config:
         env_file = ("backend/.env", ".env")

@@ -5,10 +5,13 @@ import fs from 'node:fs';
 
 process.env.ELECTRON_DISABLE_SECURITY_WARNINGS = 'true';
 
-// Enable WebRTC user media and audio autoplay flags
+// Enable WebRTC user media, UDP/STUN traffic, and audio autoplay flags
 app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
 app.commandLine.appendSwitch('enable-usermedia-screen-capturing');
 app.commandLine.appendSwitch('allow-http-screen-capture');
+app.commandLine.appendSwitch('force-webrtc-ip-handling-policy', 'default');
+app.commandLine.appendSwitch('disable-features', 'WebRtcHideLocalIpsWithMdns');
+app.commandLine.appendSwitch('enable-webrtc-pipewire-capturer');
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 

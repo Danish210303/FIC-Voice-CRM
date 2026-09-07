@@ -6,6 +6,7 @@ import {
   CheckCircle2, AlertCircle, Play, Pause, Loader2, Save, Send, Sparkles, UserCheck,
   ShieldCheck, Activity, PhoneMissed, HelpCircle, ExternalLink, Check
 } from "lucide-react";
+import { getBaseUrl, getToken } from "../api/client";
 import CustomDateTimePicker from "./CustomDateTimePicker";
 import CallEventTimeline, { CallEventItem } from "./CallEventTimeline";
 
@@ -442,29 +443,55 @@ export default function LeadActionSlideOver({
                         </span>
                       </div>
 
-                      <div className="flex items-center justify-between text-[11px] font-mono text-slate-600 dark:text-slate-400 pt-1 border-t border-slate-200/50 dark:border-white/5">
-                        <span>Duration: <strong>{formattedDur}</strong></span>
-                        {call.recording_url ? (
-                          <button
-                            onClick={() => {
-                              const audioId = call._id || call.id;
-                              setPlayingAudioId(playingAudioId === audioId ? null : audioId);
-                            }}
-                            className="flex items-center gap-1 text-[11px] font-bold text-blue-600 dark:text-blue-400 hover:underline cursor-pointer"
-                          >
-                            <Play className="h-3 w-3" />
-                            <span>{playingAudioId === (call._id || call.id) ? "Hide Recording" : "Play Recording"}</span>
-                          </button>
-                        ) : (
-                          <span className="text-[10px] text-slate-400">Recording N/A</span>
-                        )}
-                      </div>
+                      {(() => {
+                        const recSource = call.recording_url || call.recording_file || call.secure_url;
+                        const token = getToken() || localStorage.getItem("access_token");
+                        const tokenQuery = token ? `?token=${encodeURIComponent(token)}` : "";
+                        const base = getBaseUrl();
+                        let finalAudioUrl: string | null = null;
 
-                      {playingAudioId === (call._id || call.id) && call.recording_url && (
-                        <div className="pt-2">
-                          <audio controls src={call.recording_url} className="w-full h-8" autoPlay />
-                        </div>
-                      )}
+                        if (recSource) {
+                          if (recSource.startsWith("http://") || recSource.startsWith("https://")) {
+                            finalAudioUrl = recSource;
+                          } else if (recSource.startsWith("/api/")) {
+                            finalAudioUrl = `${base}${recSource}${tokenQuery}`;
+                          } else {
+                            finalAudioUrl = `${base}/api/recordings/${call._id || call.id}/stream${tokenQuery}`;
+                          }
+                        } else if (call._id || call.id) {
+                          finalAudioUrl = `${base}/api/recordings/${call._id || call.id}/stream${tokenQuery}`;
+                        }
+
+                        const isPlaying = playingAudioId === (call._id || call.id);
+
+                        return (
+                          <>
+                            <div className="flex items-center justify-between text-[11px] font-mono text-slate-600 dark:text-slate-400 pt-1 border-t border-slate-200/50 dark:border-white/5">
+                              <span>Duration: <strong>{formattedDur}</strong></span>
+                              {finalAudioUrl ? (
+                                <button
+                                  onClick={() => {
+                                    const audioId = call._id || call.id;
+                                    setPlayingAudioId(isPlaying ? null : audioId);
+                                  }}
+                                  className="flex items-center gap-1 text-[11px] font-bold text-blue-600 dark:text-blue-400 hover:underline cursor-pointer"
+                                >
+                                  <Play className="h-3 w-3" />
+                                  <span>{isPlaying ? "Hide Recording" : "Play Recording"}</span>
+                                </button>
+                              ) : (
+                                <span className="text-[10px] text-slate-400">Recording N/A</span>
+                              )}
+                            </div>
+
+                            {isPlaying && finalAudioUrl && (
+                              <div className="pt-2">
+                                <audio controls src={finalAudioUrl} className="w-full h-8" autoPlay />
+                              </div>
+                            )}
+                          </>
+                        );
+                      })()}
                     </div>
                   );
                 })

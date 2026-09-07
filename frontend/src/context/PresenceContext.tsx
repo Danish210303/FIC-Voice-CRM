@@ -73,6 +73,14 @@ export interface AgentPresence {
   last_activity?: string | null;
   is_active?: boolean;
   shift_date?: string;
+  state_started_at?: string | null;
+  total_ready_seconds?: number;
+  total_pause_seconds?: number;
+  total_talk_seconds?: number;
+  total_ringing_seconds?: number;
+  total_wrapup_seconds?: number;
+  breaks_taken?: number;
+  dispositionStartedAt?: string | null;
 }
 
 export interface PresenceSummary {
@@ -198,7 +206,7 @@ export const getStatusBadgeDetails = (status: string, pauseReason?: string | nul
   }
 };
 
-export const computeSummaryFromAgents = (agentsList: AgentPresence[]): PresenceSummary => {
+const computeSummaryFromAgents = (agentsList: AgentPresence[]): PresenceSummary => {
   let ready = 0;
   let paused = 0;
   let ringing = 0;
@@ -278,113 +286,61 @@ export const PresenceProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
   const [isCheckedInToday, setIsCheckedInToday] = useState<boolean>(false);
 
-  const grossLoginSeconds = useMemo(() => {
-    if (!isCheckedInToday || !myPresence?.login_at) return 0;
-    if (myPresence?.status === "offline" && myPresence?.logout_at) {
-      try {
-        const s = new Date(myPresence.login_at).getTime();
-        const e = new Date(myPresence.logout_at).getTime();
-        return Math.max(0, Math.floor((e - s) / 1000));
-      } catch {
-        return 0;
-      }
-    }
+  const elapsedSinceStateChange = useMemo(() => {
+    const startStr = myPresence?.state_started_at || myPresence?.status_since || myPresence?.last_status_change || myPresence?.login_at;
+    if (!startStr) return 0;
     try {
-      const loginDt = new Date(myPresence.login_at).getTime();
-      return Math.max(0, Math.floor((nowTicker - loginDt) / 1000));
+      const start = new Date(startStr).getTime();
+      return Math.max(0, Math.floor((nowTicker - start) / 1000));
     } catch {
       return 0;
     }
-  }, [isCheckedInToday, myPresence?.login_at, myPresence?.logout_at, myPresence?.status, nowTicker]);
+  }, [nowTicker, myPresence?.state_started_at, myPresence?.status_since, myPresence?.last_status_change, myPresence?.login_at]);
 
-  const completedBreakSeconds = useMemo(() => {
-    if (!isCheckedInToday || !myPresence?.login_at) return 0;
-    return (myPresence?.break_logs || []).reduce((acc: number, b: BreakLogItem) => {
-      if (typeof b.duration_seconds === "number" && !isNaN(b.duration_seconds)) {
-        return acc + b.duration_seconds;
-      }
-      if (b.start_time && b.end_time) {
-        const s = new Date(b.start_time).getTime();
-        const e = new Date(b.end_time).getTime();
-        return acc + Math.max(0, Math.floor((e - s) / 1000));
-      }
-      return acc;
-    }, 0);
-  }, [isCheckedInToday, myPresence?.login_at, myPresence?.break_logs]);
-
-  const activeBreakSeconds = useMemo(() => {
-    if (!isCheckedInToday || !myPresence?.login_at) return 0;
-    if (myStatus === "paused" || myPresence?.status === "paused") {
-      const startTimeVal = myPresence?.current_break?.start_time || myPresence?.last_status_change || myPresence?.status_since;
-      if (startTimeVal) {
-        try {
-          const cbStart = new Date(startTimeVal).getTime();
-          return Math.max(0, Math.floor((nowTicker - cbStart) / 1000));
-        } catch {
-          // Fallback below
-        }
-      }
-      if (pauseStartedAtRef.current) {
-        return Math.max(0, Math.floor((nowTicker - pauseStartedAtRef.current) / 1000));
-      }
+  // 1. Gross Login Hours (Live from check-in / login timestamp)
+  const grossLoginSeconds = useMemo(() => {
+    if (!isCheckedInToday) return 0;
+    const loginStr = myPresence?.login_at;
+    if (loginStr) {
+      try {
+        const start = new Date(loginStr).getTime();
+        return Math.max(0, Math.floor((nowTicker - start) / 1000));
+      } catch {}
     }
-    return 0;
-  }, [isCheckedInToday, myPresence?.login_at, myStatus, myPresence?.status, myPresence?.current_break, myPresence?.last_status_change, myPresence?.status_since, nowTicker]);
+    return (myPresence?.gross_seconds || 0) + (myStatus !== "offline" ? elapsedSinceStateChange : 0);
+  }, [isCheckedInToday, myPresence?.login_at, myPresence?.gross_seconds, myStatus, elapsedSinceStateChange, nowTicker]);
+  
+  // 2. Break Time (Live while paused)
+  const activeBreakSeconds = (isCheckedInToday && myStatus === "paused") ? elapsedSinceStateChange : 0;
+  const totalBreakSeconds = isCheckedInToday ? ((myPresence?.paused_seconds ?? myPresence?.total_break_seconds ?? myPresence?.total_pause_seconds ?? 0) + activeBreakSeconds) : 0;
+  
+  // 3. Ready / Available Time (Live while ready)
+  const activeReadySeconds = (isCheckedInToday && myStatus === "ready" && !(myPresence as any)?.currentCallId) ? elapsedSinceStateChange : 0;
+  const readySeconds = isCheckedInToday ? ((myPresence?.ready_seconds ?? myPresence?.total_ready_seconds ?? 0) + activeReadySeconds) : 0;
+  
+  // 4. Talk Time (Live while in_call)
+  const activeTalkSeconds = (isCheckedInToday && myStatus === "in_call") ? elapsedSinceStateChange : 0;
+  const talkSeconds = isCheckedInToday ? ((myPresence?.talk_seconds ?? myPresence?.total_talk_seconds ?? 0) + activeTalkSeconds) : 0;
+  
+  // 5. Ringing Time (Live while ringing)
+  const activeRingingSeconds = (isCheckedInToday && myStatus === "ringing") ? elapsedSinceStateChange : 0;
+  const ringingSeconds = isCheckedInToday ? ((myPresence?.ringing_seconds ?? myPresence?.total_ringing_seconds ?? 0) + activeRingingSeconds) : 0;
+  
+  // 6. Wrap-Up / Dispose Time (Live while wrap_up)
+  const activeDisposeSeconds = (isCheckedInToday && myStatus === "wrap_up") ? elapsedSinceStateChange : 0;
+  const disposeSeconds = isCheckedInToday ? ((myPresence?.dispose_seconds ?? myPresence?.total_wrapup_seconds ?? 0) + activeDisposeSeconds) : 0;
 
   const MAX_BREAK_SECONDS = 3780; // 1 Hour 3 Minutes
-  const totalBreakSeconds = isCheckedInToday ? completedBreakSeconds + activeBreakSeconds : 0;
   const isMaxBreakReached = totalBreakSeconds >= MAX_BREAK_SECONDS;
   const remainingBreakSeconds = Math.max(0, MAX_BREAK_SECONDS - totalBreakSeconds);
-
-  // Login HR = Ready Time + Pause Time => Ready Time = Login HR - Pause Time
-  const readySeconds = useMemo(() => {
-    if (!isCheckedInToday || !myPresence?.login_at) return 0;
-    return Math.max(0, grossLoginSeconds - totalBreakSeconds);
-  }, [isCheckedInToday, myPresence?.login_at, grossLoginSeconds, totalBreakSeconds]);
-
   const calculatedWorkingSeconds = readySeconds;
+  const setupSeconds = 0;
 
-  const activeDisposeSeconds = useMemo(() => {
-    if (!isCheckedInToday || !myPresence?.login_at) return 0;
-    if ((myStatus as string) === "wrap_up" || (myStatus as string) === "wrapup" || (myPresence?.status as any) === "wrap_up") {
-      const startTimeVal = myPresence?.last_status_change || myPresence?.status_since;
-      if (startTimeVal) {
-        try {
-          const cbStart = new Date(startTimeVal).getTime();
-          return Math.max(0, Math.floor((nowTicker - cbStart) / 1000));
-        } catch {
-          // Fallback
-        }
-      }
-    }
-    return 0;
-  }, [isCheckedInToday, myPresence?.login_at, myStatus, myPresence?.status, myPresence?.last_status_change, myPresence?.status_since, nowTicker]);
-
-  const talkSeconds = isCheckedInToday ? (myPresence?.talk_seconds || 0) : 0;
-  const ringingSeconds = isCheckedInToday ? (myPresence?.ringing_seconds || 0) : 0;
-  const setupSeconds = isCheckedInToday ? (myPresence?.setup_seconds || 0) : 0;
-  const disposeSeconds = isCheckedInToday ? ((myPresence?.dispose_seconds || 0) + activeDisposeSeconds) : 0;
-
-  const activeWaitingSeconds = useMemo(() => {
-    if (!isCheckedInToday || !myPresence?.login_at) return 0;
-    const isTodayShift = myPresence?.shift_date ? myPresence.shift_date === new Date().toISOString().split("T")[0] : true;
-    if (!isTodayShift) return 0;
-    if (myStatus === "ready" && myPresence?.waiting_started_at && !(myPresence as any)?.currentCallId) {
-      try {
-        const start = new Date(myPresence.waiting_started_at).getTime();
-        const diff = Math.floor((nowTicker - start) / 1000);
-        if (diff < 0 || diff > 43200) return 0;
-        return diff;
-      } catch {
-        return 0;
-      }
-    }
-    return 0;
-  }, [isCheckedInToday, myPresence?.login_at, myPresence?.shift_date, myStatus, myPresence?.waiting_started_at, (myPresence as any)?.currentCallId, nowTicker]);
-
-  const waitingSeconds = isCheckedInToday ? (myPresence?.waiting_seconds || 0) : 0;
-  const totalWaitingSeconds = isCheckedInToday ? Math.min(43200, waitingSeconds + activeWaitingSeconds) : 0;
-  const currentWaitingSeconds = activeWaitingSeconds;
+  // Waiting Time (Idle Post-Call Time)
+  const currentWaitingSeconds = activeReadySeconds;
+  const totalWaitingSeconds = readySeconds;
+  const waitingSeconds = totalWaitingSeconds;
+  const activeWaitingSeconds = currentWaitingSeconds;
 
   const stopCount = isCheckedInToday ? ((myPresence?.break_logs || []).length + (myPresence?.status === "paused" || myStatus === "paused" ? 1 : 0)) : 0;
 
@@ -409,11 +365,12 @@ export const PresenceProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     isFetchingRef.current = true;
 
     try {
-      const [agentList, summaryData, meData, activeSession, todayAtt] = await Promise.all([
+      const [agentList, summaryData, meData, activeSession, currentSession, todayAtt] = await Promise.all([
         api.get("/api/presence/agents").catch(() => []),
         api.get("/api/presence/summary").catch(() => defaultSummary),
         api.get("/api/agent/presence").catch(() => api.get("/api/presence/me").catch(() => null)),
         api.get("/api/agent/session/active").catch(() => null),
+        api.get("/api/agent/session/current").catch(() => null),
         api.get("/api/attendance/today").catch(() => null),
       ]);
 
@@ -429,21 +386,32 @@ export const PresenceProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         const uid = user.id || (user as any)._id;
         const meFromList = agentList.find((a: AgentPresence) => a.id === uid || a.user_id === uid || (a as any).agentId === uid);
         const me = meData || meFromList;
-        if (me || activeSession) {
-          const rawStatus = hasCheckedIn ? (activeSession?.raw_status || me?.status || "offline") : "offline";
-          const normalizedStatus = (rawStatus.toLowerCase().trim()) as "ready" | "paused" | "in_call" | "offline";
+        if (me || activeSession || currentSession) {
+          const rawStatus = hasCheckedIn ? (currentSession?.currentState || activeSession?.raw_status || me?.status || "offline") : "offline";
+          const normalizedStatus = (rawStatus.toLowerCase().trim()) as "ready" | "paused" | "in_call" | "offline" | "wrap_up" | "ringing";
           setMyStatus(normalizedStatus);
           setPauseReason(hasCheckedIn ? (activeSession?.currentBreak?.reason || me?.pause_reason || null) : null);
+          const tel = currentSession?.telemetry || {};
           const fullMe = {
             ...me,
             ...activeSession,
+            ...currentSession,
             id: uid,
             user_id: uid,
             status: normalizedStatus,
-            login_at: hasCheckedIn ? (todayAtt?.check_in_time || activeSession?.loginTime || me?.login_at) : null,
+            login_at: hasCheckedIn ? (currentSession?.login_at || todayAtt?.check_in_time || activeSession?.loginTime || me?.login_at) : null,
             logout_at: activeSession?.logoutTime || me?.logout_at,
             current_break: hasCheckedIn ? (activeSession?.currentBreak || me?.current_break) : null,
             break_logs: hasCheckedIn ? (activeSession?.breakLogs || me?.break_logs) : [],
+            ready_seconds: tel.readySeconds ?? me?.ready_seconds ?? 0,
+            paused_seconds: tel.pauseSeconds ?? me?.paused_seconds ?? 0,
+            talk_seconds: tel.talkSeconds ?? me?.talk_seconds ?? 0,
+            ringing_seconds: tel.ringingSeconds ?? me?.ringing_seconds ?? 0,
+            dispose_seconds: tel.wrapUpSeconds ?? me?.dispose_seconds ?? 0,
+            gross_seconds: tel.sessionSeconds ?? me?.gross_seconds ?? 0,
+            total_calls_handled: tel.callsHandled ?? me?.total_calls_handled ?? 0,
+            breaks_taken: tel.breaksTaken ?? 0,
+            state_started_at: currentSession?.stateStartedAt || me?.statusSince || new Date().toISOString()
           };
           setMyPresence((prev) => ({ ...prev, ...fullMe }));
         }
@@ -487,29 +455,75 @@ export const PresenceProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         window.dispatchEvent(new CustomEvent("lead_activity_updated", { detail: payload.data }));
       }
 
-      if (payload.event === "agent.wrapup.started" || payload.type === "agent_wrapup_started") {
-        const targetId = payload.agentId || payload.user_id;
+      if (
+        payload.event === "recording.status_changed" ||
+        payload.type === "recording_status_updated" ||
+        payload.event === "recording_status_updated"
+      ) {
+        window.dispatchEvent(new CustomEvent("recording:status_changed", { detail: payload }));
+        window.dispatchEvent(new CustomEvent("recording_status_updated", { detail: payload }));
+      }
+
+      if (payload.event === "CALL_RINGING" || payload.event === "call_ringing") {
+        const targetId = payload.agent_id || payload.agentId || payload.user_id;
         if (user && (user.id === targetId || (user as any)._id === targetId)) {
-          setMyStatus("wrap_up" as any);
+          const stTime = payload.ringing_started_at || payload.timestamp || new Date().toISOString();
+          setMyStatus("ringing");
           setMyPresence((prev: any) => ({
             ...prev,
-            status: "wrap_up",
-            dispositionStartedAt: payload.dispositionStartedAt || payload.timestamp,
-            currentCallId: payload.callId
+            status: "ringing",
+            state_started_at: stTime,
+            status_since: stTime,
+            currentCallId: payload.call_id || payload.callId
           }));
         }
       }
 
-      if (payload.event === "agent.wrapup.completed" || payload.type === "agent_wrapup_completed") {
-        const targetId = payload.agentId || payload.user_id;
+      if (payload.event === "CALL_CONNECTED" || payload.event === "call_connected") {
+        const targetId = payload.agent_id || payload.agentId || payload.user_id;
         if (user && (user.id === targetId || (user as any)._id === targetId)) {
+          const stTime = payload.connected_at || payload.timestamp || new Date().toISOString();
+          setMyStatus("in_call");
+          setMyPresence((prev: any) => ({
+            ...prev,
+            status: "in_call",
+            state_started_at: stTime,
+            status_since: stTime,
+            currentCallId: payload.call_id || payload.callId
+          }));
+        }
+      }
+
+      if (payload.event === "CALL_WRAP_UP_STARTED" || payload.event === "agent.wrapup.started" || payload.type === "agent_wrapup_started" || payload.event === "CALL_ENDED" || payload.event === "call_ended") {
+        const targetId = payload.agentId || payload.agent_id || payload.user_id;
+        const isCurrentAgent = user && (!targetId || user.id === targetId || (user as any)._id === targetId);
+        if (isCurrentAgent) {
+          const stTime = payload.wrap_up_started_at || payload.dispositionStartedAt || payload.ended_at || payload.timestamp || new Date().toISOString();
+          setMyStatus("wrap_up");
+          setMyPresence((prev: any) => ({
+            ...prev,
+            status: "wrap_up",
+            state_started_at: stTime,
+            status_since: stTime,
+            dispositionStartedAt: stTime,
+            currentCallId: payload.callId || payload.call_id || prev?.currentCallId
+          }));
+        }
+      }
+
+      if (payload.event === "CALL_DISPOSITION_SAVED" || payload.event === "agent.wrapup.completed" || payload.type === "agent_wrapup_completed") {
+        const targetId = payload.agentId || payload.agent_id || payload.user_id;
+        if (user && (!targetId || user.id === targetId || (user as any)._id === targetId)) {
+          const stTime = payload.timestamp || new Date().toISOString();
           setMyStatus("ready");
           setMyPresence((prev: any) => ({
             ...prev,
             status: "ready",
+            state_started_at: stTime,
+            status_since: stTime,
             currentCallId: null,
             dispositionStartedAt: null,
-            dispose_seconds: (prev?.dispose_seconds || 0) + (payload.disposeDurationSeconds || 0)
+            dispose_seconds: (prev?.dispose_seconds || 0) + (payload.dispose_seconds || payload.disposeDurationSeconds || payload.wrap_up_seconds || 0)
           }));
         }
       }
@@ -545,6 +559,7 @@ export const PresenceProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
       if (
         payload.type === "agent_presence_updated" ||
+        payload.event === "session.state_changed" ||
         payload.event === "agent.status.changed" ||
         payload.event === "agent:status-changed" ||
         payload.type === "agent_status_changed"
@@ -553,9 +568,11 @@ export const PresenceProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         const targetId = payload.agentId || payload.user_id || payload.agent_id || data.agentId || data.user_id || data.id;
         
         if (targetId) {
-          const rawStatus = payload.status || data.status || data.raw_status || "offline";
+          const rawStatus = payload.status || data.status || data.raw_status || data.currentState || "offline";
           const normalizedStatus = (rawStatus.toLowerCase().trim()) as "ready" | "paused" | "in_call" | "offline" | "checked_in" | "ringing" | "wrap_up";
           const incomingVersion = typeof payload.version === "number" ? payload.version : (typeof data.version === "number" ? data.version : null);
+          const stateStartedAt = data.stateStartedAt || data.state_started_at || payload.timestamp || data.timestamp || new Date().toISOString();
+          const tel = data.telemetry || {};
 
           setAgents((prevAgents) => {
             const index = prevAgents.findIndex((a) => a.id === targetId || a.user_id === targetId || a.agentId === targetId);
@@ -563,9 +580,7 @@ export const PresenceProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
             if (index !== -1) {
               const existing = prevAgents[index];
-              // Requirement 11: Ignore duplicate/outdated events using version number
-              if (incomingVersion !== null && existing.version !== undefined && existing.version !== null && incomingVersion <= existing.version) {
-                console.log(`[PRESENCE WS STALE] Ignored event version ${incomingVersion} <= existing version ${existing.version} for agent ${targetId}`);
+              if (incomingVersion !== null && existing.version !== undefined && existing.version !== null && incomingVersion < existing.version) {
                 return prevAgents;
               }
 
@@ -578,8 +593,17 @@ export const PresenceProvider: React.FC<{ children: React.ReactNode }> = ({ chil
                 agentId: targetId,
                 status: normalizedStatus,
                 version: incomingVersion ?? ((existing.version || 0) + 1),
-                statusSince: payload.statusSince || data.statusSince || data.status_since || existing.statusSince || new Date().toISOString(),
-                status_since: payload.statusSince || data.statusSince || data.status_since || existing.status_since || new Date().toISOString(),
+                statusSince: stateStartedAt,
+                status_since: stateStartedAt,
+                state_started_at: stateStartedAt,
+                ready_seconds: tel.readySeconds ?? data.ready_seconds ?? existing.ready_seconds,
+                paused_seconds: tel.pauseSeconds ?? data.paused_seconds ?? existing.paused_seconds,
+                talk_seconds: tel.talkSeconds ?? data.talk_seconds ?? existing.talk_seconds,
+                ringing_seconds: tel.ringingSeconds ?? data.ringing_seconds ?? existing.ringing_seconds,
+                dispose_seconds: tel.wrapUpSeconds ?? data.dispose_seconds ?? existing.dispose_seconds,
+                gross_seconds: tel.sessionSeconds ?? data.gross_seconds ?? existing.gross_seconds,
+                total_calls_handled: tel.callsHandled ?? data.total_calls_handled ?? existing.total_calls_handled,
+                breaks_taken: tel.breaksTaken ?? existing.breaks_taken,
               };
             } else {
               updatedList = [
@@ -591,15 +615,21 @@ export const PresenceProvider: React.FC<{ children: React.ReactNode }> = ({ chil
                   agentId: targetId,
                   status: normalizedStatus,
                   version: incomingVersion ?? 1,
-                  ready_seconds: data.ready_seconds || 0,
-                  paused_seconds: data.paused_seconds || 0,
-                  statusSince: payload.statusSince || data.statusSince || data.status_since || new Date().toISOString(),
-                  status_since: payload.statusSince || data.statusSince || data.status_since || new Date().toISOString(),
+                  statusSince: stateStartedAt,
+                  status_since: stateStartedAt,
+                  state_started_at: stateStartedAt,
+                  ready_seconds: tel.readySeconds ?? data.ready_seconds ?? 0,
+                  paused_seconds: tel.pauseSeconds ?? data.paused_seconds ?? 0,
+                  talk_seconds: tel.talkSeconds ?? data.talk_seconds ?? 0,
+                  ringing_seconds: tel.ringingSeconds ?? data.ringing_seconds ?? 0,
+                  dispose_seconds: tel.wrapUpSeconds ?? data.dispose_seconds ?? 0,
+                  gross_seconds: tel.sessionSeconds ?? data.gross_seconds ?? 0,
+                  total_calls_handled: tel.callsHandled ?? data.total_calls_handled ?? 0,
+                  breaks_taken: tel.breaksTaken ?? 0,
                 }
               ];
             }
 
-            // Requirement 10: Recalculate Ready/Pause/Off counts from latest agent store
             const newSummary = computeSummaryFromAgents(updatedList);
             setSummary(newSummary);
 
@@ -608,8 +638,25 @@ export const PresenceProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
           if (user && (user.id === targetId || (user as any)._id === targetId)) {
             setMyStatus(normalizedStatus);
-            setPauseReason(data.pause_reason || payload.reason || null);
-            setMyPresence((prev: any) => prev ? { ...prev, ...data, status: normalizedStatus } : null);
+            setPauseReason(data.pause_reason || payload.reason || (normalizedStatus === "paused" ? data.current_break?.type || "Personal Reason" : null));
+            setMyPresence((prev: any) => ({
+              ...(prev || {}),
+              ...data,
+              id: targetId,
+              user_id: targetId,
+              status: normalizedStatus,
+              state_started_at: stateStartedAt,
+              status_since: stateStartedAt,
+              statusSince: stateStartedAt,
+              ready_seconds: tel.readySeconds ?? data.ready_seconds ?? prev?.ready_seconds ?? 0,
+              paused_seconds: tel.pauseSeconds ?? data.paused_seconds ?? prev?.paused_seconds ?? 0,
+              talk_seconds: tel.talkSeconds ?? data.talk_seconds ?? prev?.talk_seconds ?? 0,
+              ringing_seconds: tel.ringingSeconds ?? data.ringing_seconds ?? prev?.ringing_seconds ?? 0,
+              dispose_seconds: tel.wrapUpSeconds ?? data.dispose_seconds ?? prev?.dispose_seconds ?? 0,
+              gross_seconds: tel.sessionSeconds ?? data.gross_seconds ?? prev?.gross_seconds ?? 0,
+              total_calls_handled: tel.callsHandled ?? data.total_calls_handled ?? prev?.total_calls_handled ?? 0,
+              breaks_taken: tel.breaksTaken ?? prev?.breaks_taken ?? 0,
+            }));
           }
         }
       }
@@ -754,11 +801,18 @@ export const PresenceProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         reconnectTimeoutRef.current = null;
       }
       if (socketRef.current) {
-        socketRef.current.onopen = null;
-        socketRef.current.onmessage = null;
-        socketRef.current.onclose = null;
-        socketRef.current.onerror = null;
-        try { socketRef.current.close(); } catch {}
+        const s = socketRef.current;
+        s.onopen = null;
+        s.onmessage = null;
+        s.onclose = null;
+        s.onerror = null;
+        if (s.readyState === WebSocket.OPEN) {
+          try { s.close(1000, "Component unmounted"); } catch {}
+        } else if (s.readyState === WebSocket.CONNECTING) {
+          s.onopen = () => {
+            try { s.close(1000, "Component unmounted"); } catch {}
+          };
+        }
         socketRef.current = null;
       }
     };
@@ -794,7 +848,7 @@ export const PresenceProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   ) => {
     if (isSubmittingStatus) return;
 
-    if (newStatus === "paused" && completedBreakSeconds >= MAX_BREAK_SECONDS) {
+    if (newStatus === "paused" && totalBreakSeconds >= MAX_BREAK_SECONDS) {
       throw new Error("Maximum daily break limit of 1 hr 3 min reached. You cannot take any more breaks today.");
     }
 

@@ -43,11 +43,21 @@ agent_status_history_col = db["agent_status_history"]
 attendance_col = db["attendance"]
 attendance_breaks_col = db["attendance_breaks"]
 holidays_col = db["holidays"]
+call_recordings_col = db["call_recordings"]
+recordings_col = db["call_recordings"]  # Aliased for backward compatibility
 
 
 async def init_indexes():
     """Ensure all indexes for MongoDB collections are created for high query performance."""
     try:
+        # Call Recordings collection indexes
+        await call_recordings_col.create_index("call_id", unique=True)
+        await call_recordings_col.create_index("lead_id")
+        await call_recordings_col.create_index("agent_id")
+        await call_recordings_col.create_index("status")
+        await call_recordings_col.create_index("public_id", sparse=True)
+        await call_recordings_col.create_index([("created_at", -1)])
+        await call_recordings_col.create_index([("agent_id", 1), ("status", 1)])
         # Users & Attendance indexes
         await users_col.create_index("email", unique=True)
         await users_col.create_index("employee_id", unique=True, sparse=True)

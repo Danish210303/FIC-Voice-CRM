@@ -12,6 +12,7 @@ import Leave from "./pages/Leave";
 import Dialer from "./pages/Dialer";
 import Quality from "./pages/Quality";
 import AIAgents from "./pages/AIAgents";
+import Recordings from "./pages/Recordings";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { DesktopTitleBar } from "./components/DesktopTitleBar";
 
@@ -104,6 +105,14 @@ export default function App() {
           element={
             <ProtectedRoute roles={["admin", "team_leader"]}>
               <Quality />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="recordings"
+          element={
+            <ProtectedRoute roles={["admin", "team_leader", "agent"]}>
+              <Recordings />
             </ProtectedRoute>
           }
         />

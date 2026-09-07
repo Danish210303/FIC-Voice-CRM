@@ -12,7 +12,7 @@ from fastapi.middleware.gzip import GZipMiddleware
 from app.core.config import settings
 from app.core.database import init_indexes, check_db_connection
 from app.core.http import get_http_client, close_http_client
-from app.routes import auth, users, pools, campaigns, leads, calls, leave, reports, ws, ai_agents, presence, attendance
+from app.routes import auth, users, pools, campaigns, leads, calls, leave, reports, ws, ai_agents, presence, attendance, recordings
 
 # ── Logging ──────────────────────────────────────────────────────────────────
 logger = logging.getLogger("uvicorn.error")
@@ -113,6 +113,7 @@ app.include_router(presence.agents_router)
 app.include_router(presence.session_router)
 app.include_router(presence.root_session_router)
 app.include_router(attendance.router)
+app.include_router(recordings.router)
 
 
 # ── Startup ──────────────────────────────────────────────────────────────────
@@ -125,8 +126,9 @@ async def on_startup():
         logger.info("[PERF] MongoDB connected and indexes initialized.")
         
         # Seed default public holidays if missing
-        from app.core.database import holidays_col
-        from app.core.utils import utcnow
+        from app.core.database import holidays_col, users_col, pools_col
+        from app.core.security import hash_password, verify_password
+        from app.core.utils import utcnow, gen_employee_id
         
         default_holidays = [
             {"date": "2026-01-01", "name": "New Year's Day", "description": "Global New Year Celebration"},
@@ -142,18 +144,47 @@ async def on_startup():
                 h["updated_at"] = utcnow()
                 await holidays_col.insert_one(h)
                 logger.info(f"Seeded holiday: {h['name']} ({h['date']})")
+
+        # Seed default system accounts if missing or password hash needs updating
+        try:
+            # Migrate legacy 'supervisor' roles to 'team_leader' in DB
+            await users_col.update_many({"role": "supervisor"}, {"$set": {"role": "team_leader"}})
+
+            default_users = [
+                {"name": "System Admin", "email": "admin@forgeindia.com", "raw_p": "Admin@123", "password": hash_password("Admin@123"), "role": "admin", "employee_id": gen_employee_id("admin"), "is_active": True, "created_at": utcnow()},
+                {"name": "Team Leader", "email": "tl@forgeindia.com", "raw_p": "Leader@123", "password": hash_password("Leader@123"), "role": "team_leader", "employee_id": gen_employee_id("team_leader"), "is_active": True, "created_at": utcnow()},
+                {"name": "Sales Agent", "email": "agent@forgeindia.com", "raw_p": "Agent@123", "password": hash_password("Agent@123"), "role": "agent", "employee_id": gen_employee_id("agent"), "agent_phone": "+919444667411", "is_active": True, "created_at": utcnow()}
+            ]
+            
+            for u_data in default_users:
+                raw_p = u_data.pop("raw_p")
+                existing = await users_col.find_one({"email": u_data["email"]})
+                if not existing:
+                    await users_col.insert_one(u_data)
+                    logger.info(f"Seeded user account: {u_data['email']}")
+                else:
+                    update_fields = {}
+                    if not verify_password(raw_p, existing.get("password", "")):
+                        update_fields["password"] = u_data["password"]
+                    if existing.get("role") == "supervisor":
+                        update_fields["role"] = "team_leader"
+                    if update_fields:
+                        await users_col.update_one({"_id": existing["_id"]}, {"$set": update_fields})
+                        logger.info(f"Refreshed account details for: {u_data['email']}")
+                
+            pool_count = await pools_col.count_documents({})
+            if pool_count == 0:
+                await pools_col.insert_one({"name": "Customer Support", "description": "Default pool", "created_at": utcnow()})
+                logger.info("Seeded default pool.")
+        except Exception as e:
+            logger.warning(f"Could not seed users due to DB error: {e}")
     else:
         logger.warning(
             "MongoDB is not accessible during startup. "
             "Make sure MongoDB is running."
         )
 
-
-@app.on_event("shutdown")
-async def on_shutdown():
-    await close_http_client()
-
-    # Validate Vapi AI environment variables on startup
+    # Validate Vapi AI environment variables
     import os
     vapi_api_key = getattr(settings, 'VAPI_API_KEY', '') or os.getenv('VAPI_API_KEY', '')
     vapi_assistant_id = getattr(settings, 'VAPI_ASSISTANT_ID', '') or os.getenv('VAPI_ASSISTANT_ID', '')
@@ -168,44 +199,10 @@ async def on_shutdown():
     else:
         logger.info("Vapi AI Configuration: All required credentials loaded successfully.")
 
-        
-    # Seed default system accounts if missing or password hash needs updating
-    from app.core.database import users_col, pools_col
-    from app.core.security import hash_password, verify_password
-    from app.core.utils import utcnow, gen_employee_id
-    
-    try:
-        # Migrate legacy 'supervisor' roles to 'team_leader' in DB
-        await users_col.update_many({"role": "supervisor"}, {"$set": {"role": "team_leader"}})
 
-        default_users = [
-            {"name": "System Admin", "email": "admin@forgeindia.com", "raw_p": "Admin@123", "password": hash_password("Admin@123"), "role": "admin", "employee_id": gen_employee_id("admin"), "is_active": True, "created_at": utcnow()},
-            {"name": "Team Leader", "email": "tl@forgeindia.com", "raw_p": "Leader@123", "password": hash_password("Leader@123"), "role": "team_leader", "employee_id": gen_employee_id("team_leader"), "is_active": True, "created_at": utcnow()},
-            {"name": "Sales Agent", "email": "agent@forgeindia.com", "raw_p": "Agent@123", "password": hash_password("Agent@123"), "role": "agent", "employee_id": gen_employee_id("agent"), "agent_phone": "+919444667411", "is_active": True, "created_at": utcnow()}
-        ]
-        
-        for u_data in default_users:
-            raw_p = u_data.pop("raw_p")
-            existing = await users_col.find_one({"email": u_data["email"]})
-            if not existing:
-                await users_col.insert_one(u_data)
-                logger.info(f"Seeded user account: {u_data['email']}")
-            else:
-                update_fields = {}
-                if not verify_password(raw_p, existing.get("password", "")):
-                    update_fields["password"] = u_data["password"]
-                if existing.get("role") == "supervisor":
-                    update_fields["role"] = "team_leader"
-                if update_fields:
-                    await users_col.update_one({"_id": existing["_id"]}, {"$set": update_fields})
-                    logger.info(f"Refreshed account details for: {u_data['email']}")
-            
-        pool_count = await pools_col.count_documents({})
-        if pool_count == 0:
-            await pools_col.insert_one({"name": "Customer Support", "description": "Default pool", "created_at": utcnow()})
-            logger.info("Seeded default pool.")
-    except Exception as e:
-        logger.warning(f"Could not seed users due to DB error: {e}")
+@app.on_event("shutdown")
+async def on_shutdown():
+    await close_http_client()
 
 
 # ── Health & Root ────────────────────────────────────────────────────────────

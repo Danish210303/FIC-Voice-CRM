@@ -183,10 +183,12 @@ class LeadCreate(BaseModel):
     email: Optional[EmailStr] = None
     pool_id: str
     campaign_id: Optional[str] = None
+    assigned_agent_id: Optional[str] = None
+    status: Optional[str] = "new"
     source: Optional[str] = "manual"
     extra: Optional[dict] = Field(default_factory=dict)
 
-    @field_validator("email", "campaign_id", mode="before")
+    @field_validator("email", "campaign_id", "assigned_agent_id", mode="before")
     @classmethod
     def empty_str_to_none(cls, v):
         if isinstance(v, str) and not v.strip():

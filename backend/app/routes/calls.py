@@ -30,6 +30,7 @@ from app.schemas.common import (
 )
 from app.services.ws_manager import ws_manager
 from app.routes.presence import record_call_completion, record_presence_change
+from app.routes.recordings import handle_call_recording_start, handle_call_recording_completed
 
 logger = logging.getLogger(__name__)
 
@@ -95,28 +96,12 @@ async def plivo_answer_webhook(request: Request):
     base_url = str(request.base_url).rstrip("/")
     record_callback_url = f"{base_url}/api/calls/plivo/recording-callback"
 
-    # Broadcast real-time call connected status event to CRM frontend over WebSockets
-    await ws_manager.broadcast_global({
-        "event": "call_status_update",
-        "call_status": "in-progress",
-        "from": from_number,
-        "to": to_number,
-        "call_sid": call_uuid,
-        "provider": "plivo"
-    })
+    conn_now = utcnow()
+    conn_now_iso = conn_now.isoformat()
 
     is_webrtc_call = from_number.lower().startswith("sip:") or "sip" in from_number.lower()
 
     if direction in ("inbound", "in") and not is_webrtc_call:
-        await ws_manager.broadcast_global({
-            "event": "inbound_call",
-            "from": from_number,
-            "to": to_number,
-            "call_sid": call_uuid,
-            "provider": "plivo"
-        })
-        
-        # INSERT INBOUND CALL LOG
         clean_from_inbound = normalize_e164(from_number) if from_number else ""
         raw_digits = re.sub(r"\D", "", clean_from_inbound)
         search_regex = raw_digits[-10:] if len(raw_digits) >= 10 else raw_digits
@@ -129,32 +114,101 @@ async def plivo_answer_webhook(request: Request):
                 ]
             })
             
-        await calls_col.insert_one({
+        ins_res = await calls_col.insert_one({
             "call_sid": call_uuid,
             "direction": "inbound",
             "phone": clean_from_inbound,
             "status": "live",
-            "started_at": utcnow(),
+            "call_status": "connected",
+            "call_state": "connected",
+            "started_at": conn_now,
+            "ringing_started_at": conn_now,
+            "connected_at": conn_now,
+            "ended_at": None,
+            "wrap_up_started_at": None,
+            "wrap_up_completed_at": None,
+            "disposition": None,
+            "duration_seconds": 0,
+            "ringing_seconds": 0,
+            "dispose_seconds": 0,
             "lead_id": str(caller_lead["_id"]) if caller_lead else None,
         })
+        active_call_id = str(ins_res.inserted_id)
+        
+        await ws_manager.broadcast_global({
+            "event": "inbound_call",
+            "from": from_number,
+            "to": to_number,
+            "call_sid": call_uuid,
+            "call_id": active_call_id,
+            "provider": "plivo"
+        })
     else:
-        # UPDATE CALL_SID FOR OUTBOUND CALLS
+        # UPDATE CALL_SID AND CONNECTED_AT FOR OUTBOUND CALLS
         clean_to_outbound = normalize_e164(to_number) if to_number else ""
-        if clean_to_outbound:
-            raw_digits = re.sub(r"\D", "", clean_to_outbound)
-            search_regex = raw_digits[-10:] if len(raw_digits) >= 10 else raw_digits
-            if search_regex:
-                await calls_col.update_many(
-                    {
-                        "status": "live",
-                        "$or": [
-                            {"phone": clean_to_outbound},
-                            {"phone": {"$regex": search_regex}}
-                        ],
-                        "call_sid": {"$exists": False}
-                    },
-                    {"$set": {"call_sid": call_uuid}}
-                )
+        raw_digits = re.sub(r"\D", "", clean_to_outbound) if clean_to_outbound else ""
+        search_regex = raw_digits[-10:] if len(raw_digits) >= 10 else raw_digits
+        
+        active_call = await calls_col.find_one({
+            "status": "live",
+            "$or": [
+                {"call_sid": call_uuid},
+                {"phone": clean_to_outbound},
+                {"phone": {"$regex": search_regex}} if search_regex else {"phone": clean_to_outbound}
+            ]
+        })
+        
+        active_call_id = str(active_call["_id"]) if active_call else None
+        ringing_sec = 0
+        if active_call:
+            if active_call.get("ringing_started_at"):
+                try:
+                    r_dt = active_call["ringing_started_at"] if isinstance(active_call["ringing_started_at"], datetime) else datetime.fromisoformat(str(active_call["ringing_started_at"]).replace("Z", "+00:00"))
+                    ringing_sec = max(0, int((conn_now.replace(tzinfo=None) - r_dt.replace(tzinfo=None)).total_seconds()))
+                except Exception:
+                    pass
+            await calls_col.update_one(
+                {"_id": active_call["_id"]},
+                {"$set": {
+                    "connected_at": conn_now,
+                    "call_status": "connected",
+                    "call_state": "connected",
+                    "call_sid": call_uuid,
+                    "ringing_seconds": ringing_sec
+                }}
+            )
+            if active_call.get("agent_id"):
+                try:
+                    await record_presence_change(user_id=str(active_call["agent_id"]), new_status="in_call")
+                except Exception as pe:
+                    logger.warning(f"[PLIVO ANSWER PRESENCE] {pe}")
+
+    # Broadcast real-time call connected status event to CRM frontend over WebSockets
+    await ws_manager.broadcast_global({
+        "event": "CALL_CONNECTED",
+        "call_id": active_call_id,
+        "call_status": "connected",
+        "connected_at": conn_now_iso,
+        "from": from_number,
+        "to": to_number,
+        "call_sid": call_uuid,
+        "provider": "plivo"
+    })
+    await ws_manager.broadcast_global({
+        "event": "call_connected",
+        "call_id": active_call_id,
+        "connected_at": conn_now_iso,
+        "call_status": "connected"
+    })
+    await ws_manager.broadcast_global({
+        "event": "call_status_update",
+        "call_status": "in-progress",
+        "connected_at": conn_now_iso,
+        "from": from_number,
+        "to": to_number,
+        "call_sid": call_uuid,
+        "provider": "plivo"
+    })
 
     clean_from  = normalize_e164(from_number) if from_number else ""
     clean_to    = normalize_e164(to_number) if to_number else ""
@@ -198,6 +252,11 @@ async def plivo_answer_webhook(request: Request):
                     if possible_target.replace("+", "") != clean_to_digits:
                         target_to_dial = possible_target
 
+    base_url = getattr(settings, "BASE_URL", "") or str(request.base_url).rstrip("/")
+    if "localhost" in base_url or "127.0.0.1" in base_url:
+        base_url = str(request.base_url).rstrip("/")
+    record_callback_url = f"{base_url}/api/calls/plivo/recording-callback"
+
     if target_to_dial:
         dial_digits = target_to_dial.replace("+", "")
         
@@ -205,7 +264,8 @@ async def plivo_answer_webhook(request: Request):
             plivo_xml = (
                 '<?xml version="1.0" encoding="UTF-8"?>\n'
                 '<Response>\n'
-                f'    <Dial callerId="{plivo_caller_id}" timeout="45" record="true" recordCallback="{record_callback_url}">\n'
+                f'    <Record action="{record_callback_url}" method="POST" startOnDialAnswer="true" redirect="false" maxLength="3600" fileFormat="wav"/>\n'
+                f'    <Dial callerId="{plivo_caller_id}" timeout="45">\n'
                 f'        <User>{target_to_dial}</User>\n'
                 '    </Dial>\n'
                 '    <Wait length="3600"/>\n'
@@ -215,7 +275,8 @@ async def plivo_answer_webhook(request: Request):
             plivo_xml = (
                 '<?xml version="1.0" encoding="UTF-8"?>\n'
                 '<Response>\n'
-                f'    <Dial callerId="{plivo_caller_id}" timeout="45" record="true" recordCallback="{record_callback_url}">\n'
+                f'    <Record action="{record_callback_url}" method="POST" startOnDialAnswer="true" redirect="false" maxLength="3600" fileFormat="wav"/>\n'
+                f'    <Dial callerId="{plivo_caller_id}" timeout="45">\n'
                 f'        <Number>{dial_digits}</Number>\n'
                 '    </Dial>\n'
                 '    <Wait length="3600"/>\n'
@@ -224,10 +285,6 @@ async def plivo_answer_webhook(request: Request):
     else:
         if direction in ("inbound", "in"):
             # Default inbound routing: Play IVR menu
-            base_url = str(request.base_url).rstrip("/")
-            # Note: the actual path prefix (like /api/calls) will be part of the router mount,
-            # but to be safe we can use a relative or hardcoded path if preferred.
-            # Usually request.url.path gives the current path. For now, constructing a generic IVR url:
             ivr_action_url = f"{base_url}/api/calls/ivr-callback" 
             plivo_xml = (
                 '<?xml version="1.0" encoding="UTF-8"?>\n'
@@ -251,7 +308,8 @@ async def plivo_answer_webhook(request: Request):
                 plivo_xml = (
                     '<?xml version="1.0" encoding="UTF-8"?>\n'
                     '<Response>\n'
-                    f'    <Dial callerId="{plivo_caller_id}" timeout="45" record="true" recordCallback="{record_callback_url}">\n'
+                    f'    <Record action="{record_callback_url}" method="POST" startOnDialAnswer="true" redirect="false" maxLength="3600" fileFormat="wav"/>\n'
+                    f'    <Dial callerId="{plivo_caller_id}" timeout="45">\n'
                     f'        <User>{sip_uri}</User>\n'
                     '    </Dial>\n'
                     '</Response>'
@@ -284,7 +342,9 @@ async def ivr_callback(request: Request):
     digits = form_data.get("Digits", "")
     plivo_number_raw = getattr(settings, "PLIVO_PHONE_NUMBER", "+918031826757")
     plivo_caller_id  = normalize_e164(plivo_number_raw)
-    base_url = str(request.base_url).rstrip("/")
+    base_url = getattr(settings, "BASE_URL", "") or str(request.base_url).rstrip("/")
+    if "localhost" in base_url or "127.0.0.1" in base_url:
+        base_url = str(request.base_url).rstrip("/")
     record_callback_url = f"{base_url}/api/calls/plivo/recording-callback"
     
     if digits == "1":
@@ -293,7 +353,8 @@ async def ivr_callback(request: Request):
         plivo_xml = (
             '<?xml version="1.0" encoding="UTF-8"?>\n'
             '<Response>\n'
-            f'    <Dial callerId="{plivo_caller_id}" timeout="45" record="true" recordCallback="{record_callback_url}">\n'
+            f'    <Record action="{record_callback_url}" method="POST" startOnDialAnswer="true" redirect="false" maxLength="3600" fileFormat="wav"/>\n'
+            f'    <Dial callerId="{plivo_caller_id}" timeout="45">\n'
             f'        <Number>{target_number}</Number>\n'
             '    </Dial>\n'
             '</Response>'
@@ -304,14 +365,14 @@ async def ivr_callback(request: Request):
         plivo_xml = (
             '<?xml version="1.0" encoding="UTF-8"?>\n'
             '<Response>\n'
-            f'    <Dial callerId="{plivo_caller_id}" timeout="45" record="true" recordCallback="{record_callback_url}">\n'
+            f'    <Record action="{record_callback_url}" method="POST" startOnDialAnswer="true" redirect="false" maxLength="3600" fileFormat="wav"/>\n'
+            f'    <Dial callerId="{plivo_caller_id}" timeout="45">\n'
             f'        <Number>{target_number}</Number>\n'
             '    </Dial>\n'
             '</Response>'
         )
     elif digits == "3":
         # Replay menu without "Invalid input" prefix
-        base_url = str(request.base_url).rstrip("/")
         ivr_action_url = f"{base_url}/api/calls/ivr-callback" 
         plivo_xml = (
             '<?xml version="1.0" encoding="UTF-8"?>\n'
@@ -323,7 +384,6 @@ async def ivr_callback(request: Request):
         )
     else:
         # Invalid or no input, replay menu with error prefix
-        base_url = str(request.base_url).rstrip("/")
         ivr_action_url = f"{base_url}/api/calls/ivr-callback" 
         plivo_xml = (
             '<?xml version="1.0" encoding="UTF-8"?>\n'
@@ -488,6 +548,8 @@ async def plivo_recording_callback(request: Request):
     """
     Plivo Recording URL Callback.
     Plivo posts to this URL when a call recording is ready.
+    Ingests the audio recording into Cloudinary (resource_type: 'video')
+    and syncs metadata into call_recordings collection.
     """
     try:
         if request.method == "POST":
@@ -498,20 +560,73 @@ async def plivo_recording_callback(request: Request):
         else:
             form_data = request.query_params
 
-        call_uuid = form_data.get("CallUUID", "")
-        recording_url = form_data.get("RecordUrl", "")
+        call_uuid = form_data.get("CallUUID", "") or form_data.get("call_uuid", "")
+        parent_call_uuid = form_data.get("ParentCallUUID", "") or form_data.get("parent_call_uuid", "")
+        recording_url = form_data.get("RecordUrl", "") or form_data.get("RecordingUrl", "") or form_data.get("recording_url", "")
+        recording_duration = form_data.get("RecordingDuration", "0") or form_data.get("duration", "0")
+        recording_id = form_data.get("RecordingID", "") or form_data.get("recording_id", "")
 
-        if call_uuid and recording_url:
-            print(f"[Plivo Recording] call_uuid={call_uuid} recording_url={recording_url}")
-            res = await calls_col.update_many(
-                {"call_sid": call_uuid},
-                {"$set": {"recording_file": recording_url, "recording_status": "saved"}}
-            )
-            if res.modified_count == 0:
-                print(f"[Plivo Recording] Warning: No call found with call_sid={call_uuid}")
+        print(f"[Plivo Recording Callback] call_uuid={call_uuid} parent={parent_call_uuid} rec_id={recording_id} url={recording_url} duration={recording_duration}s")
+
+        if recording_url:
+            duration_sec = 0
+            try:
+                duration_sec = int(float(recording_duration))
+            except Exception:
+                duration_sec = 0
+
+            # Match associated call document
+            query_conditions = []
+            if call_uuid:
+                query_conditions.append({"call_sid": call_uuid})
+                if _safe_oid(call_uuid):
+                    query_conditions.append({"_id": _safe_oid(call_uuid)})
+            if parent_call_uuid:
+                query_conditions.append({"call_sid": parent_call_uuid})
+
+            call_doc = await calls_col.find_one({"$or": query_conditions}) if query_conditions else None
+
+            if call_doc:
+                call_id_val = str(call_doc.get("_id") or call_doc.get("id"))
+                if not duration_sec and call_doc.get("duration_seconds"):
+                    duration_sec = int(call_doc["duration_seconds"])
+
+                await calls_col.update_one(
+                    {"_id": call_doc["_id"]},
+                    {"$set": {
+                        "recording_file": recording_url,
+                        "recording_status": "processing",
+                        "recording_id": recording_id or call_uuid,
+                        "duration_seconds": duration_sec or call_doc.get("duration_seconds", 0)
+                    }}
+                )
+
+                # Trigger Cloudinary upload & asset indexing
+                await handle_call_recording_completed(
+                    call_id=call_id_val,
+                    duration_seconds=duration_sec,
+                    outcome=call_doc.get("outcome") or call_doc.get("status") or "completed",
+                    notes=call_doc.get("notes"),
+                    ai_summary=call_doc.get("ai_summary"),
+                    transcript=call_doc.get("transcript"),
+                    remote_url=recording_url,
+                    lead_id=str(call_doc.get("lead_id")) if call_doc.get("lead_id") else None,
+                    agent_id=str(call_doc.get("agent_id")) if call_doc.get("agent_id") else None,
+                    phone=call_doc.get("phone"),
+                    pool_id=call_doc.get("pool_id")
+                )
+            else:
+                # Store standalone recording reference using call_uuid
+                rec_target_id = call_uuid or parent_call_uuid or f"plivo_{int(utcnow().timestamp())}"
+                await handle_call_recording_completed(
+                    call_id=rec_target_id,
+                    duration_seconds=duration_sec,
+                    outcome="completed",
+                    remote_url=recording_url
+                )
 
     except Exception as e:
-        print(f"[Plivo Recording Callback] Error: {e}")
+        print(f"[Plivo Recording Callback Error] {e}")
 
     return PlainTextResponse("OK", media_type="text/plain")
 
@@ -551,6 +666,97 @@ async def plivo_status_callback(request: Request):
             "canceled":  "canceled",
         }
         mapped_status = status_map.get(call_status, call_status)
+
+        # Match active call in DB
+        clean_to = normalize_e164(to_number) if to_number else ""
+        raw_digits = re.sub(r"\D", "", clean_to) if clean_to else ""
+        search_regex = raw_digits[-10:] if len(raw_digits) >= 10 else raw_digits
+
+        active_call = await calls_col.find_one({
+            "$or": [
+                {"call_sid": call_uuid},
+                {"phone": clean_to} if clean_to else {"call_sid": call_uuid},
+                {"phone": {"$regex": search_regex}} if search_regex else {"call_sid": call_uuid}
+            ]
+        })
+
+        if active_call and active_call.get("status") == "live":
+            now_utc = utcnow()
+            now_iso = now_utc.isoformat()
+            if mapped_status == "completed":
+                talk_sec = 0
+                if active_call.get("connected_at"):
+                    try:
+                        c_dt = active_call["connected_at"] if isinstance(active_call["connected_at"], datetime) else datetime.fromisoformat(str(active_call["connected_at"]).replace("Z", "+00:00"))
+                        talk_sec = max(0, int((now_utc.replace(tzinfo=None) - c_dt.replace(tzinfo=None)).total_seconds()))
+                    except Exception:
+                        try:
+                            talk_sec = int(duration)
+                        except Exception:
+                            talk_sec = 0
+                else:
+                    try:
+                        talk_sec = int(duration)
+                    except Exception:
+                        talk_sec = 0
+
+                await calls_col.update_one(
+                    {"_id": active_call["_id"]},
+                    {"$set": {
+                        "status": "wrap_up",
+                        "call_status": "wrap_up",
+                        "call_state": "ended",
+                        "ended_at": now_utc,
+                        "wrap_up_started_at": now_utc,
+                        "dispositionStartedAt": now_iso,
+                        "duration_seconds": talk_sec
+                    }}
+                )
+                if active_call.get("agent_id"):
+                    try:
+                        await record_presence_change(user_id=str(active_call["agent_id"]), new_status="wrap_up")
+                    except Exception as pe:
+                        logger.warning(f"[PLIVO STATUS PRESENCE] {pe}")
+
+                await ws_manager.broadcast_global({
+                    "event": "CALL_ENDED",
+                    "call_id": str(active_call["_id"]),
+                    "ended_at": now_iso,
+                    "wrap_up_started_at": now_iso,
+                    "talk_seconds": talk_sec,
+                    "status": "wrap_up"
+                })
+                await ws_manager.broadcast_global({
+                    "event": "CALL_WRAP_UP_STARTED",
+                    "call_id": str(active_call["_id"]),
+                    "agent_id": str(active_call.get("agent_id")),
+                    "wrap_up_started_at": now_iso,
+                    "status": "wrap_up"
+                })
+                await ws_manager.broadcast_global({
+                    "event": "agent.wrapup.started",
+                    "agentId": str(active_call.get("agent_id")),
+                    "callId": str(active_call["_id"]),
+                    "dispositionStartedAt": now_iso,
+                    "status": "WRAP_UP"
+                })
+            elif mapped_status in ("busy", "failed", "no-answer", "canceled"):
+                await calls_col.update_one(
+                    {"_id": active_call["_id"]},
+                    {"$set": {
+                        "status": "completed",
+                        "call_status": mapped_status,
+                        "call_state": mapped_status,
+                        "outcome": mapped_status,
+                        "ended_at": now_utc
+                    }}
+                )
+                if active_call.get("agent_id"):
+                    try:
+                        await record_presence_change(user_id=str(active_call["agent_id"]), new_status="ready")
+                    except Exception as pe:
+                        logger.warning(f"[PLIVO STATUS PRESENCE] {pe}")
+                release_call_lock(agent_id=active_call.get("agent_id"), call_id=str(active_call["_id"]))
 
         await ws_manager.broadcast_global({
             "event": "call_status_update",
@@ -656,6 +862,17 @@ async def start_call(payload: CallStart, user: dict = Depends(get_current_user))
     except Exception as err:
         logger.warning(f"[CALL START] Could not update presence status to in_call: {err}")
 
+    try:
+        await handle_call_recording_start(
+            call_id=str(doc["_id"]),
+            lead_id=payload.lead_id,
+            agent_id=uid_val,
+            phone=lead.get("phone", ""),
+            pool_id=lead.get("pool_id")
+        )
+    except Exception as e:
+        logger.warning(f"[CALL START RECORDING] Could not init recording: {e}")
+
     await ws_manager.broadcast(lead["pool_id"], {
         "event": "call_started", "call_id": str(doc["_id"]), "lead_name": lead["name"], "agent_id": uid_val,
     })
@@ -686,6 +903,22 @@ async def end_call(payload: CallEnd):
     }
     await calls_col.update_one({"_id": ObjectId(payload.call_id)}, {"$set": update})
     release_call_lock(agent_id=agent_id, call_id=payload.call_id)
+
+    try:
+        await handle_call_recording_completed(
+            call_id=str(payload.call_id),
+            duration_seconds=payload.duration_seconds or 0,
+            outcome=payload.outcome or "completed",
+            notes=payload.notes,
+            ai_summary=payload.ai_summary,
+            transcript=payload.transcript,
+            lead_id=str(call.get("lead_id")) if call.get("lead_id") else None,
+            agent_id=agent_id,
+            phone=call.get("phone"),
+            pool_id=call.get("pool_id")
+        )
+    except Exception as e:
+        logger.warning(f"[CALL END RECORDING] Could not complete recording: {e}")
 
     if agent_id:
         try:
@@ -1294,7 +1527,9 @@ async def record_call_disposition(call_id: str, payload: CallDispositionPayload,
 
     update_fields = {
         "status": "completed",
+        "call_status": "completed",
         "dispositionCompletedAt": completed_at_iso,
+        "wrap_up_completed_at": completed_at,
         "endedAt": completed_at_iso,
         "ended_at": completed_at,
         "duration_seconds": max(1, duration),
@@ -1307,19 +1542,35 @@ async def record_call_disposition(call_id: str, payload: CallDispositionPayload,
         "follow_up_time": payload.follow_up_time,
         "rating": payload.rating,
         "recording_url": "https://actions.google.com/sounds/v1/ambiences/office_voices.ogg",
-        "ai_summary": f"Inbound BPO Call completed ({payload.disposition.upper()}). Notes: {payload.notes or 'No notes provided'}"
+        "ai_summary": f"BPO Call completed ({payload.disposition.upper()}). Notes: {payload.notes or 'No notes provided'}"
     }
     await calls_col.update_one(query, {
         "$set": update_fields,
         "$push": {"events": disp_event}
     })
+
+    try:
+        await handle_call_recording_completed(
+            call_id=str(call_id),
+            duration_seconds=duration,
+            outcome=payload.disposition,
+            notes=payload.notes,
+            ai_summary=update_fields.get("ai_summary"),
+            transcript=call.get("transcript"),
+            lead_id=str(call.get("lead_id")) if call.get("lead_id") else None,
+            agent_id=agent_id,
+            phone=call.get("phone"),
+            pool_id=call.get("pool_id")
+        )
+    except Exception as e:
+        logger.warning(f"[DISPOSITION RECORDING] Error processing recording: {e}")
     
     if call.get("lead_id"):
         try:
             await leads_col.update_one(
                 {"_id": ObjectId(call["lead_id"])},
                 {"$set": {
-                    "status": "completed" if payload.disposition in ["resolved", "closed"] else "in_progress",
+                    "status": "completed" if payload.disposition in ["resolved", "closed", "converted"] else "in_progress",
                     "last_disposition": payload.disposition,
                     "notes": payload.notes
                 }}
@@ -1330,10 +1581,14 @@ async def record_call_disposition(call_id: str, payload: CallDispositionPayload,
     try:
         await record_call_completion(user_id=agent_id, duration_seconds=duration, dispose_seconds=dispose_sec, call_id=call_id, outcome=payload.disposition)
         await record_presence_change(user_id=agent_id, new_status="ready")
-        await users_col.update_one({"_id": ObjectId(agent_id)}, {"$unset": {"currentCallId": "", "dispositionStartedAt": ""}})
+        agent_oid = _safe_oid(agent_id)
+        if agent_oid:
+            await users_col.update_one({"_id": agent_oid}, {"$unset": {"currentCallId": "", "dispositionStartedAt": ""}})
     except Exception as err:
         logger.warning(f"[DISPOSITION] Error updating agent completion/presence: {err}")
     
+    release_call_lock(agent_id=agent_id, call_id=call_id)
+
     wrapup_completed_payload = {
         "eventId": f"evt_wrapcomp_{completed_at.strftime('%Y%m%d%H%M%S')}_{agent_id[-6:]}",
         "agentId": agent_id,
@@ -1350,6 +1605,21 @@ async def record_call_disposition(call_id: str, payload: CallDispositionPayload,
     }
     try:
         await ws_manager.broadcast_global(wrapup_completed_payload)
+        await ws_manager.broadcast_global({
+            "event": "CALL_DISPOSITION_SAVED",
+            "call_id": call_id,
+            "agent_id": agent_id,
+            "disposition": payload.disposition,
+            "dispose_seconds": dispose_sec,
+            "status": "ready"
+        })
+        await ws_manager.broadcast_global({
+            "event": "CALL_COMPLETED",
+            "call_id": call_id,
+            "agent_id": agent_id,
+            "disposition": payload.disposition,
+            "dispose_seconds": dispose_sec
+        })
     except Exception as e:
         logger.warning(f"[DISPOSITION WS] Error broadcasting agent.wrapup.completed: {e}")
 
@@ -1719,11 +1989,14 @@ async def simulate_call_stream(call_id: str, pool_id: str):
 
 @router.get("/active")
 async def get_current_active_call(user: dict = Depends(get_current_user)):
-    """Returns the current user's live active call session (if any), after cleaning stale sessions."""
+    """Returns the current user's live active or wrap-up call session, with full persisted lifecycle timestamps."""
     agent_id = _uid(user)
     await cleanup_stale_db_calls(agent_id=agent_id)
 
-    call = await calls_col.find_one({"agent_id": agent_id, "status": "live"})
+    call = await calls_col.find_one({
+        "agent_id": agent_id,
+        "status": {"$in": ["live", "wrap_up", "ringing", "in-progress", "in_call"]}
+    })
     if not call:
         return None
 
@@ -1731,6 +2004,13 @@ async def get_current_active_call(user: dict = Depends(get_current_user)):
     call_data = oid_str(call)
     call_data["phone"] = lead.get("phone") if lead else call.get("phone", "")
     call_data["lead_name"] = lead.get("name") if lead else "Customer"
+    
+    # Authoritative timestamps
+    call_data["ringing_started_at"] = call.get("ringing_started_at").isoformat() if isinstance(call.get("ringing_started_at"), datetime) else call.get("ringing_started_at")
+    call_data["connected_at"] = call.get("connected_at").isoformat() if isinstance(call.get("connected_at"), datetime) else call.get("connected_at")
+    call_data["ended_at"] = call.get("ended_at").isoformat() if isinstance(call.get("ended_at"), datetime) else call.get("ended_at")
+    call_data["wrap_up_started_at"] = call.get("wrap_up_started_at").isoformat() if isinstance(call.get("wrap_up_started_at"), datetime) else (call.get("wrap_up_started_at") or call.get("dispositionStartedAt") or call.get("wrapup_started_at"))
+    call_data["call_status"] = call.get("call_status") or ("wrap_up" if call.get("status") == "wrap_up" else ("connected" if call.get("connected_at") else "ringing"))
     return call_data
 
 
@@ -2112,13 +2392,11 @@ async def start_manual_dial(payload: ManualDialPayload, user: dict = Depends(get
     if not acquired:
         if lock_reason == "IDEMPOTENCY_HIT" and payload.idempotency_key:
             return processed_idempotency_keys[payload.idempotency_key]["result"]
-        # Double check if lock is stale
+        # Clean stale ghost calls and clear previous agent lock to allow new call
         await cleanup_stale_db_calls(agent_id=assigned_agent_id, lead_id=lead_id_str)
-        acquired_retry, lock_reason_retry = acquire_call_lock(normalized_phone, assigned_agent_id, payload.idempotency_key)
-        if not acquired_retry:
-            raise HTTPException(status.HTTP_409_CONFLICT, lock_reason_retry)
+        release_call_lock(phone=normalized_phone, agent_id=assigned_agent_id)
 
-    # 2. Check DB for active live call
+    # 2. Check DB for active live call and gracefully close previous unclosed session
     existing_call = await calls_col.find_one({
         "$or": [
             {"lead_id": lead_id_str, "status": "live"},
@@ -2126,10 +2404,11 @@ async def start_manual_dial(payload: ManualDialPayload, user: dict = Depends(get
         ]
     })
     if existing_call:
-        raise HTTPException(
-            status.HTTP_409_CONFLICT,
-            f"An active call session already exists (Call ID: {str(existing_call['_id'])})"
+        await calls_col.update_one(
+            {"_id": existing_call["_id"]},
+            {"$set": {"status": "completed", "outcome": "replaced_by_new_call", "ended_at": utcnow()}}
         )
+        release_call_lock(agent_id=assigned_agent_id, call_id=str(existing_call["_id"]))
 
     agent_phone = None
     if payload.agent_assign_mode == "manual" and payload.assigned_agent_id:
@@ -2239,6 +2518,9 @@ async def start_manual_dial(payload: ManualDialPayload, user: dict = Depends(get
         f"[{utcnow().isoformat()}] [SIP] Call established via {'Vapi AI Agent' if is_ai_call else 'Plivo PSTN'} (Vapi ID: {vapi_call_id})"
     ]
 
+    now_utc = utcnow()
+    now_iso = now_utc.isoformat()
+
     doc = {
         "lead_id": lead_id_str,
         "phone": normalized_phone,
@@ -2248,10 +2530,11 @@ async def start_manual_dial(payload: ManualDialPayload, user: dict = Depends(get
         "agent_id": assigned_agent_id,
         "direction": "outbound",
         "status": "live",
+        "call_status": "ringing",
+        "call_state": "ringing",
         "call_mode": getattr(payload, 'call_mode', 'human') or 'human',
         "is_ai": is_ai_call,
         "vapi_call_id": vapi_call_id,
-        "call_state": "active",
         "muted": False,
         "priority": payload.priority,
         "language": payload.language,
@@ -2261,8 +2544,17 @@ async def start_manual_dial(payload: ManualDialPayload, user: dict = Depends(get
         "ai_suggestions": [],
         "sentiment": "neutral",
         "recording_status": "recording",
-        "recording_file": f"C:/recordings/manual_{lead_id_str}_{int(utcnow().timestamp())}.wav",
-        "started_at": utcnow(),
+        "recording_file": f"C:/recordings/manual_{lead_id_str}_{int(now_utc.timestamp())}.wav",
+        "started_at": now_utc,
+        "ringing_started_at": now_utc,
+        "connected_at": None,
+        "ended_at": None,
+        "wrap_up_started_at": None,
+        "wrap_up_completed_at": None,
+        "disposition": None,
+        "duration_seconds": 0,
+        "ringing_seconds": 0,
+        "dispose_seconds": 0,
         "twilio_sid": None
     }
 
@@ -2272,6 +2564,11 @@ async def start_manual_dial(payload: ManualDialPayload, user: dict = Depends(get
 
     print(f"[MANUAL] call created: {call_id_str}")
 
+    try:
+        await record_presence_change(user_id=assigned_agent_id, new_status="ringing")
+    except Exception as pe:
+        logger.warning(f"[MANUAL DIAL PRESENCE] {pe}")
+
     response_doc = oid_str(doc)
     register_call_lock(normalized_phone, assigned_agent_id, call_id_str, payload.idempotency_key, response_doc)
 
@@ -2279,6 +2576,36 @@ async def start_manual_dial(payload: ManualDialPayload, user: dict = Depends(get
     active_call_streams[call_id_str] = task
 
     ws_payload = {
+        "event": "CALL_CREATED",
+        "call_id": call_id_str,
+        "ringing_started_at": now_iso,
+        "lead_name": lead["name"],
+        "agent_id": assigned_agent_id,
+        "phone": normalized_phone,
+        "pool_id": payload.pool_id,
+        "direction": "outbound",
+        "call_status": "ringing",
+        "is_manual": True,
+        "sip_logs": sip_logs
+    }
+    await ws_manager.broadcast("global", ws_payload)
+    await ws_manager.broadcast(payload.pool_id, ws_payload)
+
+    await ws_manager.broadcast_global({
+        "event": "CALL_RINGING",
+        "call_id": call_id_str,
+        "ringing_started_at": now_iso,
+        "agent_id": assigned_agent_id,
+        "phone": normalized_phone,
+        "call_status": "ringing"
+    })
+    await ws_manager.broadcast_global({
+        "event": "call_ringing",
+        "call_id": call_id_str,
+        "ringing_started_at": now_iso,
+        "phone": normalized_phone
+    })
+    await ws_manager.broadcast_global({
         "event": "call_started",
         "call_id": call_id_str,
         "lead_name": lead["name"],
@@ -2287,9 +2614,7 @@ async def start_manual_dial(payload: ManualDialPayload, user: dict = Depends(get
         "direction": "outbound",
         "is_manual": True,
         "sip_logs": sip_logs
-    }
-    await ws_manager.broadcast("global", ws_payload)
-    await ws_manager.broadcast(payload.pool_id, ws_payload)
+    })
 
     return response_doc
 
@@ -2421,8 +2746,8 @@ async def end_manual_call(call_id: str, payload: CallEnd, user: dict = Depends(g
     if not call:
         call = await calls_col.find_one({"id": call_id})
     if not call:
-        # For manual demo calls not yet persisted in DB, synthesize response
-        return {"status": "success", "message": "Manual call session ended", "call_id": call_id}
+        # Synthesize idempotent response for manual demo calls not yet persisted
+        return {"status": "wrap_up", "message": "Manual call session ended", "call_id": call_id}
         
     task = active_call_streams.pop(call_id, None)
     if task:
@@ -2436,65 +2761,298 @@ async def end_manual_call(call_id: str, payload: CallEnd, user: dict = Depends(g
         
     ai_summary = payload.ai_summary
     if not ai_summary:
-        ai_summary = "Manual Dial call successfully connected to recipient. Discussed query and updated details in CRM."
+        ai_summary = "Manual Dial call connected. Call ended, entering Wrap-Up disposition."
         
+    now_utc = utcnow()
+    now_iso = now_utc.isoformat()
+
+    # Calculate authoritative Talk Time from connected_at timestamp
+    talk_sec = 0
+    if call.get("connected_at"):
+        try:
+            c_dt = call["connected_at"] if isinstance(call["connected_at"], datetime) else datetime.fromisoformat(str(call["connected_at"]).replace("Z", "+00:00"))
+            talk_sec = max(0, int((now_utc.replace(tzinfo=None) - c_dt.replace(tzinfo=None)).total_seconds()))
+        except Exception:
+            talk_sec = payload.duration_seconds or 0
+    else:
+        talk_sec = payload.duration_seconds or 0
+
     update = {
-        "status": "completed",
-        "outcome": payload.outcome,
-        "duration_seconds": payload.duration_seconds,
+        "status": "wrap_up",
+        "call_status": "wrap_up",
+        "outcome": payload.outcome or "wrap_up",
+        "duration_seconds": talk_sec,
         "notes": payload.notes or call.get("notes", ""),
         "ai_summary": ai_summary,
         "transcript": transcript_text,
         "recording_status": "saved",
-        "ended_at": utcnow()
+        "ended_at": now_utc,
+        "endedAt": now_iso,
+        "wrap_up_started_at": now_utc,
+        "wrapup_started_at": now_iso,
+        "dispositionStartedAt": now_iso
     }
     
     await calls_col.update_one(
-        {"_id": ObjectId(call_id)},
+        {"_id": call["_id"]},
         {
             "$set": update,
             "$push": {"sip_logs": sip_msg}
         }
     )
     
-    lead_status = "new"
-    if payload.outcome in ["qualified", "answered"]:
-        lead_status = "qualified"
-    elif payload.outcome == "not_interested":
-        lead_status = "not_interested"
-    elif payload.outcome == "follow_up_required":
-        lead_status = "follow_up"
-        
-    await leads_col.update_one(
-        {"_id": ObjectId(call["lead_id"])},
-        {"$set": {"status": lead_status}}
-    )
-    
+    agent_id = str(call.get("agent_id") or _uid(user))
+    if agent_id:
+        try:
+            await record_presence_change(user_id=agent_id, new_status="wrap_up")
+            agent_oid = _safe_oid(agent_id)
+            if agent_oid:
+                await users_col.update_one(
+                    {"_id": agent_oid},
+                    {"$set": {
+                        "currentCallId": call_id,
+                        "dispositionStartedAt": now_iso
+                    }}
+                )
+        except Exception as pe:
+            logger.warning(f"[MANUAL END PRESENCE] {pe}")
+
     await audit_logs_col.insert_one({
         "action": "end_manual_dial",
         "user_id": _uid(user),
         "call_id": call_id,
-        "outcome": payload.outcome,
-        "timestamp": utcnow()
+        "outcome": payload.outcome or "wrap_up",
+        "timestamp": now_utc
     })
     
     ws_payload = {
+        "event": "CALL_ENDED",
+        "call_id": call_id,
+        "outcome": payload.outcome or "wrap_up",
+        "ended_at": now_iso,
+        "wrap_up_started_at": now_iso,
+        "talk_seconds": talk_sec,
+        "status": "wrap_up",
+        "pool_id": call.get("pool_id", "global")
+    }
+    await ws_manager.broadcast("global", ws_payload)
+    await ws_manager.broadcast(call.get("pool_id", "global"), ws_payload)
+
+    await ws_manager.broadcast_global({
+        "event": "CALL_WRAP_UP_STARTED",
+        "call_id": call_id,
+        "agent_id": agent_id,
+        "wrap_up_started_at": now_iso,
+        "status": "wrap_up"
+    })
+    await ws_manager.broadcast_global({
+        "event": "agent.wrapup.started",
+        "agentId": agent_id,
+        "callId": call_id,
+        "dispositionStartedAt": now_iso,
+        "status": "WRAP_UP"
+    })
+    await ws_manager.broadcast_global({
         "event": "call_ended",
         "call_id": call_id,
-        "outcome": payload.outcome,
-        "pool_id": call["pool_id"]
-    }
-    agent_id = call.get("agent_id") if call else _uid(user)
-    if agent_id:
-        await record_call_completion(
-            user_id=str(agent_id),
-            duration_seconds=payload.duration_seconds or 0,
-            call_id=call_id,
-            outcome=payload.outcome or "completed"
-        )
+        "outcome": payload.outcome or "wrap_up"
+    })
 
-    release_call_lock(agent_id=agent_id or _uid(user), call_id=call_id)
-    return {"status": "completed"}
+    return {"status": "wrap_up", "call_id": call_id, "wrap_up_started_at": now_iso, "talk_seconds": talk_sec}
+
+
+@router.get("/active", dependencies=[Depends(require_roles(Role.ADMIN, Role.TEAM_LEADER, Role.AGENT))])
+async def get_current_active_call(user: dict = Depends(get_current_user)):
+    """
+    Fetch active or wrap-up call session for the logged-in agent to reconstruct exact timer state.
+    """
+    uid = _uid(user)
+    agent_oid = _safe_oid(uid)
+
+    call = await calls_col.find_one({
+        "$or": [{"agent_id": uid}, {"agent_id": agent_oid}] if agent_oid else [{"agent_id": uid}],
+        "status": {"$in": ["live", "ringing", "in_call", "wrap_up"]}
+    }, sort=[("created_at", -1)])
+
+    if not call:
+        return {"active": False, "call": None}
+
+    c_status = "ready"
+    if call.get("status") == "wrap_up" or call.get("call_status") == "wrap_up":
+        c_status = "wrapup"
+    elif call.get("connected_at"):
+        c_status = "connected"
+    elif call.get("status") in ["live", "ringing"] or call.get("call_status") == "ringing":
+        c_status = "ringing"
+
+    def _iso(dt):
+        if not dt:
+            return None
+        if isinstance(dt, datetime):
+            return dt.isoformat()
+        return str(dt)
+
+    return {
+        "active": True,
+        "call": {
+            "call_id": str(call["_id"]),
+            "phone": call.get("phone", ""),
+            "lead_id": str(call.get("lead_id", "")),
+            "call_status": c_status,
+            "ringing_started_at": _iso(call.get("ringing_started_at")),
+            "connected_at": _iso(call.get("connected_at")),
+            "ended_at": _iso(call.get("ended_at")),
+            "wrap_up_started_at": _iso(call.get("wrap_up_started_at")),
+            "wrap_up_completed_at": _iso(call.get("wrap_up_completed_at")),
+            "disposition": call.get("disposition") or call.get("outcome")
+        }
+    }
+
+
+@router.post("/{call_id}/disposition", dependencies=[Depends(require_roles(Role.ADMIN, Role.TEAM_LEADER, Role.AGENT))])
+async def record_call_disposition(call_id: str, payload: CallDispositionPayload, user: dict = Depends(get_current_user)):
+    """
+    Submits call disposition, ends wrap-up timer, marks call completed, and returns agent to READY.
+    """
+    query = {"_id": ObjectId(call_id)} if ObjectId.is_valid(call_id) else {"_id": call_id}
+    call = await calls_col.find_one(query)
+    if not call:
+        call = await calls_col.find_one({"id": call_id})
+    if not call:
+        return {"status": "success", "message": "Call disposition noted", "call_id": call_id}
+
+    now_utc = utcnow()
+    now_iso = now_utc.isoformat()
+
+    # Calculate wrap-up time
+    wrap_sec = 0
+    if call.get("wrap_up_started_at"):
+        try:
+            w_dt = call["wrap_up_started_at"] if isinstance(call["wrap_up_started_at"], datetime) else datetime.fromisoformat(str(call["wrap_up_started_at"]).replace("Z", "+00:00"))
+            wrap_sec = max(0, int((now_utc.replace(tzinfo=None) - w_dt.replace(tzinfo=None)).total_seconds()))
+        except Exception:
+            pass
+
+    duration_sec = call.get("duration_seconds") or payload.duration_seconds or 0
+
+    update = {
+        "status": "completed",
+        "call_status": "completed",
+        "disposition": payload.disposition,
+        "outcome": payload.disposition,
+        "wrap_up_completed_at": now_utc,
+        "disposition_completed_at": now_iso,
+        "wrap_up_seconds": wrap_sec,
+        "dispose_seconds": wrap_sec,
+        "disposeDurationSeconds": wrap_sec,
+        "duration_seconds": duration_sec,
+        "notes": payload.notes or call.get("notes", "")
+    }
+    if payload.follow_up_date:
+        update["follow_up_date"] = payload.follow_up_date
+    if payload.follow_up_time:
+        update["follow_up_time"] = payload.follow_up_time
+
+    disp_title = f"Agent Updated Disposition ({payload.disposition.replace('_', ' ').title()})"
+    disp_desc = f"Status set to: {payload.disposition.replace('_', ' ').title()}" + (f" • Notes: {payload.notes}" if payload.notes else "")
+    disp_event = {
+        "id": f"evt_disp_{now_utc.timestamp()}",
+        "timestamp": now_utc.strftime("%I:%M:%S %p"),
+        "title": disp_title,
+        "description": disp_desc,
+        "dotColor": "bg-purple-500 ring-4 ring-purple-100 dark:ring-purple-900/30",
+        "type": "disposition",
+        "created_at": now_iso
+    }
+
+    await calls_col.update_one({"_id": call["_id"]}, {
+        "$set": update,
+        "$push": {"events": disp_event}
+    })
+
+    agent_id = str(call.get("agent_id") or _uid(user))
+
+    # Update Lead status if linked
+    if call.get("lead_id"):
+        try:
+            lead_status = "closed" if payload.disposition in ["interested", "converted", "not_interested", "dnc"] else "follow_up_required" if payload.disposition in ["call_back", "follow_up_required"] else "in_progress"
+            lead_query = {"_id": ObjectId(call["lead_id"])} if ObjectId.is_valid(call["lead_id"]) else {"_id": call["lead_id"]}
+            await leads_col.update_one(
+                lead_query,
+                {"$set": {
+                    "status": lead_status,
+                    "last_disposition": payload.disposition,
+                    "notes": payload.notes or call.get("notes", ""),
+                    "follow_up_date": payload.follow_up_date
+                }}
+            )
+        except Exception as le:
+            logger.warning(f"[DISPOSITION LEAD UPDATE] {le}")
+
+    # Finalize recording metadata if present
+    try:
+        await handle_call_recording_completed(
+            call_id=str(call["_id"]),
+            duration_seconds=duration_sec,
+            outcome=payload.disposition,
+            notes=payload.notes,
+            ai_summary=call.get("ai_summary"),
+            transcript=call.get("transcript"),
+            lead_id=str(call.get("lead_id")) if call.get("lead_id") else None,
+            agent_id=agent_id,
+            phone=call.get("phone"),
+            pool_id=call.get("pool_id")
+        )
+    except Exception as re:
+        logger.warning(f"[DISPOSITION RECORDING] {re}")
+
+    if agent_id:
+        try:
+            await record_call_completion(user_id=agent_id, duration_seconds=duration_sec, dispose_seconds=wrap_sec, call_id=str(call["_id"]), outcome=payload.disposition)
+            await record_presence_change(user_id=agent_id, new_status="ready")
+            agent_oid = _safe_oid(agent_id)
+            if agent_oid:
+                await users_col.update_one(
+                    {"_id": agent_oid},
+                    {"$unset": {"currentCallId": "", "dispositionStartedAt": ""}}
+                )
+        except Exception as pe:
+            logger.warning(f"[DISPOSITION PRESENCE] {pe}")
+
+    ws_payload = {
+        "event": "CALL_DISPOSITION_SAVED",
+        "call_id": call_id,
+        "agent_id": agent_id,
+        "disposition": payload.disposition,
+        "wrap_up_completed_at": now_iso,
+        "wrap_up_seconds": wrap_sec,
+        "dispose_seconds": wrap_sec
+    }
+    await ws_manager.broadcast("global", ws_payload)
+    await ws_manager.broadcast_global({
+        "event": "agent.wrapup.completed",
+        "agentId": agent_id,
+        "callId": call_id,
+        "status": "READY",
+        "disposition": payload.disposition,
+        "disposeDurationSeconds": wrap_sec,
+        "timestamp": now_iso
+    })
+    await ws_manager.broadcast_global({
+        "event": "CALL_COMPLETED",
+        "call_id": call_id,
+        "agent_id": agent_id,
+        "status": "completed",
+        "disposition": payload.disposition
+    })
+
+    return {
+        "status": "success",
+        "call_id": call_id,
+        "disposition": payload.disposition,
+        "wrap_up_seconds": wrap_sec,
+        "agent_status": "ready"
+    }
 
 
 @router.post("/{call_id}/dtmf", dependencies=[Depends(require_roles(Role.ADMIN, Role.TEAM_LEADER, Role.AGENT))])

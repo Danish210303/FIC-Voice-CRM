@@ -20,7 +20,8 @@ import {
   ChevronRight,
   Activity,
   RefreshCw,
-  Bot
+  Bot,
+  FileAudio
 } from "lucide-react";
 
 type NavGroup = {
@@ -97,6 +98,7 @@ export default function Layout() {
             },
             { to: "/dialer", label: "Manual Dialer", icon: <Phone className="h-5 w-5" /> },
             { to: "/reports", label: "Call Logs", icon: <History className="h-5 w-5" /> },
+            { to: "/recordings", label: "Call Recordings", icon: <FileAudio className="h-5 w-5" /> },
           ],
         },
         {
@@ -128,6 +130,7 @@ export default function Layout() {
             },
             { to: "/dialer", label: "Manual Dialer", icon: <Phone className="h-5 w-5" /> },
             { to: "/reports", label: "Call Logs", icon: <History className="h-5 w-5" /> },
+            { to: "/recordings", label: "Call Recordings", icon: <FileAudio className="h-5 w-5" /> },
           ],
         },
         {
@@ -148,6 +151,7 @@ export default function Layout() {
             { to: "/dialer", label: "Softphone Dialer", icon: <Phone className="h-5 w-5" /> },
             { to: "/campaigns", label: "Campaigns", icon: <Megaphone className="h-5 w-5" /> },
             { to: "/reports", label: "Call Logs", icon: <History className="h-5 w-5" /> },
+            { to: "/recordings", label: "My Recordings", icon: <FileAudio className="h-5 w-5" /> },
           ],
         },
       ];
@@ -165,6 +169,7 @@ export default function Layout() {
     if (path === "/users") return "Recruitment & Access Control";
     if (path === "/live-calls") return "Live Call Console";
     if (path === "/reports") return "Call Logs & Analytics";
+    if (path === "/recordings") return "Voice Call Recordings Vault";
     if (path === "/quality") return "Quality Audit";
     if (path === "/leave") return "Leave Approvals";
     if (path === "/dialer") return "Softphone Dialer";

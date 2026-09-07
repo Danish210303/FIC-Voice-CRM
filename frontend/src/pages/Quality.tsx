@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback } from "react";
-import { api } from "../api/client";
+import { api, getBaseUrl, getToken } from "../api/client";
 import { useToast } from "../context/ToastContext";
 import { CustomSelect } from "../components/CustomSelect";
 import {
@@ -34,6 +34,8 @@ type CallLog = {
   started_at: string;
   ended_at?: string;
   recording_file?: string;
+  recording_url?: string;
+  secure_url?: string;
   quality_evaluation?: {
     coaching_notes: string;
     ai_quality_score: number;
@@ -42,6 +44,32 @@ type CallLog = {
     evaluated_by: string;
     evaluated_at: string;
   };
+};
+
+const getRecordingAudioUrl = (call: CallLog | null): string | null => {
+  if (!call) return null;
+  const token = getToken() || localStorage.getItem("access_token");
+  const tokenQuery = token ? `?token=${encodeURIComponent(token)}` : "";
+  const base = getBaseUrl();
+
+  const file = call.recording_file || call.recording_url || call.secure_url;
+  if (file) {
+    if (file.startsWith("http://") || file.startsWith("https://")) {
+      return file;
+    }
+    if (file.startsWith("/api/")) {
+      return `${base}${file}${tokenQuery}`;
+    }
+    if (file.endsWith(".wav") || file.endsWith(".mp3") || file.endsWith(".ogg") || file.startsWith("rec_")) {
+      return `${base}/api/recordings/${call.id}/stream${tokenQuery}`;
+    }
+  }
+
+  const callId = call.id || (call as any)._id;
+  if (callId) {
+    return `${base}/api/recordings/${callId}/stream${tokenQuery}`;
+  }
+  return null;
 };
 
 const SENTIMENT_OPTIONS = [
@@ -260,15 +288,18 @@ export default function Quality() {
                 </div>
                 
                 {/* Audio player */}
-                {selectedCall.recording_file && selectedCall.recording_file.startsWith('http') ? (
-                  <div className="flex items-center gap-3.5 bg-white dark:bg-[#111827] border border-slate-200 dark:border-white/10 px-4 py-2.5 rounded-[16px] shadow-sm self-start md:self-center">
-                    <audio controls src={selectedCall.recording_file} className="w-64 h-10" />
-                  </div>
-                ) : (
-                  <div className="flex items-center gap-3.5 bg-white dark:bg-[#111827] border border-slate-200 dark:border-white/10 px-4 py-2.5 rounded-[16px] shadow-sm self-start md:self-center text-xs font-bold text-slate-500">
-                    <span className="flex items-center gap-2"><Volume2 className="h-4 w-4" /> No Recording Available</span>
-                  </div>
-                )}
+                {(() => {
+                  const audioUrl = getRecordingAudioUrl(selectedCall);
+                  return audioUrl ? (
+                    <div className="flex items-center gap-3.5 bg-white dark:bg-[#111827] border border-slate-200 dark:border-white/10 px-4 py-2.5 rounded-[16px] shadow-sm self-start md:self-center">
+                      <audio controls src={audioUrl} className="w-64 h-10" />
+                    </div>
+                  ) : (
+                    <div className="flex items-center gap-3.5 bg-white dark:bg-[#111827] border border-slate-200 dark:border-white/10 px-4 py-2.5 rounded-[16px] shadow-sm self-start md:self-center text-xs font-bold text-slate-500">
+                      <span className="flex items-center gap-2"><Volume2 className="h-4 w-4" /> No Recording Available</span>
+                    </div>
+                  );
+                })()}
               </div>
 
               <div className="flex justify-center mt-6">

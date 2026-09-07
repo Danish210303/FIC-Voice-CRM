@@ -7,40 +7,18 @@ const RENDER_PROD_URL = "https://ai-voice-agent-crm.onrender.com";
 let currentBaseUrl: string | null = null;
 
 export const getBaseUrl = (): string => {
-  // 1. User configured custom API URL in localStorage takes precedence
   if (typeof localStorage !== "undefined") {
-    const savedUrl = localStorage.getItem("custom_api_url");
-    if (savedUrl && savedUrl.trim() !== "") {
-      return savedUrl.trim().replace(/\/+$/, "");
+    const custom = localStorage.getItem("custom_api_url");
+    if (custom && custom.trim() !== "") {
+      return custom.trim().replace(/\/+$/, "");
     }
   }
-
-  // 2. Check environment variable VITE_API_URL if configured
-  if (import.meta.env.VITE_API_URL && import.meta.env.VITE_API_URL.trim() !== "") {
-    let url = import.meta.env.VITE_API_URL.trim().replace(/\/+$/, "");
-    if (url.startsWith(":")) {
-      const protocol = typeof window !== "undefined" ? window.location.protocol : "http:";
-      const hostname = typeof window !== "undefined" ? window.location.hostname : "localhost";
-      url = `${protocol}//${hostname}${url}`;
-    }
-    return url;
+  const envUrl = (import.meta as any).env?.VITE_API_URL;
+  if (envUrl && typeof envUrl === "string" && envUrl.trim() !== "") {
+    return envUrl.trim().replace(/\/+$/, "");
   }
-
-  // 3. In Vite development mode on localhost, fallback to local backend if running
-  const isViteDev = Boolean(import.meta.env.DEV);
-  const isLocalHost =
-    typeof window !== "undefined" &&
-    (window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1");
-
-  if (isViteDev && isLocalHost) {
-    return "http://localhost:8000";
-  }
-
-  // 4. Default Target: Production Render Backend
-  return RENDER_PROD_URL;
+  return "http://localhost:8000";
 };
-
-
 
 export const setCustomApiUrl = (newUrl: string | null) => {
   if (typeof localStorage !== "undefined") {
