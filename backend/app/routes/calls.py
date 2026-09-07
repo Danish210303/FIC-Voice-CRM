@@ -105,7 +105,9 @@ async def plivo_answer_webhook(request: Request):
         "provider": "plivo"
     })
 
-    if direction in ("inbound", "in"):
+    is_webrtc_call = from_number.lower().startswith("sip:") or "sip" in from_number.lower()
+
+    if direction in ("inbound", "in") and not is_webrtc_call:
         await ws_manager.broadcast_global({
             "event": "inbound_call",
             "from": from_number,
@@ -158,8 +160,6 @@ async def plivo_answer_webhook(request: Request):
     clean_to    = normalize_e164(to_number) if to_number else ""
     clean_agent = normalize_e164(agent_phone) if agent_phone else ""
     clean_dial  = normalize_e164(dial_to) if dial_to else ""
-
-    is_webrtc_call = from_number.lower().startswith("sip:") or "sip" in from_number.lower()
 
     # Determine bridge target
     target_to_dial = ""

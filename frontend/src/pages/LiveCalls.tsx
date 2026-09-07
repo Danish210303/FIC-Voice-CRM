@@ -836,7 +836,13 @@ export default function LiveCalls() {
     showToast(`${actionLabels[action]} for Call ${targetCall.formatted_lead_id}`, "success");
 
     if (action === "end") {
-      setCalls((prev) => prev.filter((c) => c.id !== id));
+      api.post(`/api/calls/${id}/force-end`)
+        .then(() => {
+          setCalls((prev) => prev.filter((c) => c.id !== id));
+        })
+        .catch((err: any) => {
+          showToast(err.response?.data?.detail || err.message || "Failed to force end call", "error");
+        });
     }
   };
 

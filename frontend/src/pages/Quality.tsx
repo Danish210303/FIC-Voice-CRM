@@ -260,7 +260,7 @@ export default function Quality() {
                 </div>
                 
                 {/* Audio player */}
-                {selectedCall.recording_file ? (
+                {selectedCall.recording_file && selectedCall.recording_file.startsWith('http') ? (
                   <div className="flex items-center gap-3.5 bg-white dark:bg-[#111827] border border-slate-200 dark:border-white/10 px-4 py-2.5 rounded-[16px] shadow-sm self-start md:self-center">
                     <audio controls src={selectedCall.recording_file} className="w-64 h-10" />
                   </div>
