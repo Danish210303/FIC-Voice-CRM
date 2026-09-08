@@ -127,19 +127,17 @@ export async function apiFetch(
 
       clearTimeout(timeoutId);
 
-      // Handle 401 Unauthorized safely: only wipe localStorage if on core auth verify or explicitly unauthorized
+      // Handle 401 Unauthorized safely: clear expired token and prompt login
       if (res.status === 401 && !isPublicPath) {
-        if (path.startsWith("/api/auth") || path.startsWith("/api/users/me")) {
-          if (typeof localStorage !== "undefined") {
-            localStorage.removeItem("access_token");
-            localStorage.removeItem("user");
-          }
-          if (typeof window !== "undefined" && !window.location.hash.includes("/login")) {
-            window.dispatchEvent(new CustomEvent("auth:unauthorized"));
-            window.location.hash = "#/login";
-          }
+        if (typeof localStorage !== "undefined") {
+          localStorage.removeItem("access_token");
+          localStorage.removeItem("user");
         }
-        const authErr = new Error("Authentication failed (401 Unauthorized).");
+        if (typeof window !== "undefined" && !window.location.hash.includes("/login")) {
+          window.dispatchEvent(new CustomEvent("auth:unauthorized"));
+          window.location.hash = "#/login";
+        }
+        const authErr = new Error("Session expired (401 Unauthorized). Please log in again.");
         authErr.name = "AuthError";
         throw authErr;
       }
