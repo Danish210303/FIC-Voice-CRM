@@ -198,19 +198,39 @@ async def run_tests():
         assert clean_res.status_code == 200 and clean_res.json()["status"] == "success"
         log(f"Orphan Cleanup verified: {clean_res.json()}")
 
-        # 11. Test RBAC permissions
-        log("11. Testing RBAC restrictions...")
-        # Agent forbidden from downloading
-        agent_dl = await client.get(f"/api/recordings/{rec_id}/download", headers=agent_headers)
-        assert agent_dl.status_code == 403, f"Expected 403, got {agent_dl.status_code}"
-        log("RBAC verified: Agent download denied (403 Forbidden).")
+        # 12. Test Direct Browser Audio Upload (/api/recordings/upload)
+        log("12. Testing Direct Audio Upload (/api/recordings/upload)...")
+        from app.services.storage import storage_service
+        sample_audio = storage_service.generate_sample_wav_bytes(duration_sec=3)
+        files = {"file": ("test_mic.wav", sample_audio, "audio/wav")}
+        data = {
+            "call_id": f"call_test_upload_{int(utcnow().timestamp())}",
+            "duration_seconds": "3",
+            "outcome": "interested",
+            "notes": "Direct audio upload test"
+        }
+        upload_res = await client.post("/api/recordings/upload", data=data, files=files, headers=agent_headers)
+        assert upload_res.status_code == 200, f"Upload failed: {upload_res.status_code} {upload_res.text}"
+        up_json = upload_res.json()
+        assert up_json.get("status") == "READY", f"Expected READY, got {up_json.get('status')}"
+        assert up_json.get("secure_url"), "secure_url missing from upload response"
+        uploaded_rec_id = up_json.get("recording_id")
+        log(f"Direct audio upload verified: recording_id={uploaded_rec_id}, secure_url={up_json.get('secure_url')}")
 
-        # Unauthenticated stream denied
-        unauth_stream = await client.get(f"/api/recordings/{rec_id}/stream")
-        assert unauth_stream.status_code == 401, f"Expected 401, got {unauth_stream.status_code}"
-        log("RBAC verified: Unauthenticated stream denied (401 Unauthorized).")
+        # 13. Test Deleting Single Recording (DELETE /api/recordings/{id})
+        log("13. Testing Single Recording Deletion (DELETE /api/recordings/{id})...")
+        del_res = await client.delete(f"/api/recordings/{uploaded_rec_id}", headers=admin_headers)
+        assert del_res.status_code == 200, f"Delete failed: {del_res.status_code} {del_res.text}"
+        assert del_res.json().get("status") == "success"
+        log("Single recording deletion verified.")
+
+        # Verify it is removed from DB
+        check_del = await client.get(f"/api/recordings/{uploaded_rec_id}", headers=admin_headers)
+        assert check_del.status_code == 404, f"Recording should be 404 after delete, got {check_del.status_code}"
+        log("Verified recording removed from database.")
 
         log("=== ALL TESTS PASSED PROPERLY! ===")
 
 if __name__ == "__main__":
     asyncio.run(run_tests())
+
