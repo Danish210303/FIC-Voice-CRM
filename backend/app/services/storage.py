@@ -229,11 +229,14 @@ class RecordingStorageService:
             logger.error(f"[STORAGE ERROR] Failed to delete recording file {filename}: {e}")
         return False
 
-    def delete_cloudinary_asset(self, public_id: str) -> bool:
+    def delete_cloudinary_asset(self, public_id: str, type_access: str = "upload") -> bool:
         """Destroys an audio/video asset on Cloudinary."""
         if self.is_cloudinary_configured() and CLOUDINARY_AVAILABLE:
             try:
-                res = cloudinary.uploader.destroy(public_id, resource_type="video", type="authenticated")
+                res = cloudinary.uploader.destroy(public_id, resource_type="video", type=type_access)
+                if isinstance(res, dict) and res.get("result") != "ok":
+                    alt_type = "authenticated" if type_access == "upload" else "upload"
+                    res = cloudinary.uploader.destroy(public_id, resource_type="video", type=alt_type)
                 logger.info(f"[CLOUDINARY] Destroyed asset {public_id}: {res}")
                 return True
             except Exception as e:

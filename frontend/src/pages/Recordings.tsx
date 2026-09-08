@@ -28,10 +28,13 @@ import {
   ChevronRight,
   X,
   Radio,
-  HardDrive,
   Cloud,
   Lock,
-  ExternalLink
+  Headphones,
+  User,
+  Phone,
+  Activity,
+  Check
 } from "lucide-react";
 
 export type RecordingItem = {
@@ -139,6 +142,14 @@ export default function Recordings() {
   const [playbackUrl, setPlaybackUrl] = useState<string>("");
   const [activeTab, setActiveTab] = useState<"player" | "metadata" | "transcript" | "events">("player");
 
+  // Multi-Selection State for Bulk Deletion
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+
+  // Delete Modals State
+  const [recordingToDelete, setRecordingToDelete] = useState<RecordingItem | null>(null);
+  const [showBatchDeleteModal, setShowBatchDeleteModal] = useState(false);
+  const [isDeleting, setIsDeleting] = useState(false);
+
   // Audio Player State
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
@@ -150,7 +161,7 @@ export default function Recordings() {
   const [audioLoading, setAudioLoading] = useState(false);
   const [audioError, setAudioError] = useState<string | null>(null);
 
-  // Cleanup orphans modal
+  // Maintenance & cleanup modal
   const [showCleanupModal, setShowCleanupModal] = useState(false);
   const [cleaningOrphans, setCleaningOrphans] = useState(false);
   const [cleanupResult, setCleanupResult] = useState<any>(null);
@@ -247,7 +258,6 @@ export default function Recordings() {
       if (!data) return;
 
       console.log("[RECORDINGS WS EVENT]", data);
-      // Reload stats and current list
       loadStats();
       setRecordings((prev) => {
         const recId = data.recording_id || data.data?.id;
@@ -285,9 +295,30 @@ export default function Recordings() {
     window.addEventListener("recording:status_changed", handleWsRecordingUpdate);
     window.addEventListener("recording_status_updated", handleWsRecordingUpdate);
 
+    const handleWsRecordingDelete = (e: Event) => {
+      const customEvt = e as CustomEvent;
+      const data = customEvt.detail;
+      if (!data) return;
+      const recId = data.recording_id;
+      const callId = data.call_id;
+      setRecordings((prev) => prev.filter((item) => item.id !== recId && item._id !== recId && item.call_id !== callId));
+      setSelectedRec((prev) => {
+        if (prev && ((prev.id === recId) || (prev._id === recId) || prev.call_id === callId)) {
+          return null;
+        }
+        return prev;
+      });
+      loadStats();
+    };
+
+    window.addEventListener("recording:deleted", handleWsRecordingDelete);
+    window.addEventListener("recording_deleted", handleWsRecordingDelete);
+
     return () => {
       window.removeEventListener("recording:status_changed", handleWsRecordingUpdate);
       window.removeEventListener("recording_status_updated", handleWsRecordingUpdate);
+      window.removeEventListener("recording:deleted", handleWsRecordingDelete);
+      window.removeEventListener("recording_deleted", handleWsRecordingDelete);
     };
   }, [loadStats]);
 
@@ -355,6 +386,117 @@ export default function Recordings() {
       showToast("Call recording download started.", "info");
     } catch (err: any) {
       showToast(err.message || "Failed to download recording", "error");
+    }
+  };
+
+  // Single Recording Deletion Confirmation
+  const confirmDeleteSingle = async () => {
+    if (!recordingToDelete) return;
+    setIsDeleting(true);
+    const recId = recordingToDelete.id || recordingToDelete._id || recordingToDelete.call_id;
+    try {
+      try {
+        await api.delete(`/api/recordings/${recId}`);
+      } catch (delErr: any) {
+        if (delErr?.status === 405 || delErr?.message?.includes("405") || delErr?.message?.includes("Method Not Allowed")) {
+          try {
+            await api.post(`/api/recordings/${recId}/delete`);
+          } catch {
+            await api.post("/api/recordings/batch-delete", { recording_ids: [recId] });
+          }
+        } else {
+          throw delErr;
+        }
+      }
+
+      showToast("Call recording deleted permanently.", "success");
+      
+      setRecordings((prev) =>
+        prev.filter((r) => (r.id || r._id) !== (recordingToDelete.id || recordingToDelete._id) && r.call_id !== recordingToDelete.call_id)
+      );
+
+      setSelectedIds((prev) => {
+        const next = new Set(prev);
+        if (recordingToDelete.id) next.delete(recordingToDelete.id);
+        if (recordingToDelete._id) next.delete(recordingToDelete._id);
+        next.delete(recordingToDelete.call_id);
+        return next;
+      });
+
+      if (
+        selectedRec &&
+        ((selectedRec.id && selectedRec.id === (recordingToDelete.id || recordingToDelete._id)) ||
+          (selectedRec._id && selectedRec._id === (recordingToDelete.id || recordingToDelete._id)) ||
+          selectedRec.call_id === recordingToDelete.call_id)
+      ) {
+        setSelectedRec(null);
+        setPlaybackUrl("");
+      }
+
+      setRecordingToDelete(null);
+      loadStats();
+    } catch (err: any) {
+      showToast(err.message || "Failed to delete call recording.", "error");
+    } finally {
+      setIsDeleting(false);
+    }
+  };
+
+  // Batch Multi-Selection Deletion
+  const confirmBatchDelete = async () => {
+    if (selectedIds.size === 0) return;
+    setIsDeleting(true);
+    const ids = Array.from(selectedIds);
+    try {
+      const res = await api.post("/api/recordings/batch-delete", { recording_ids: ids });
+      showToast(`Deleted ${res.deleted_count || ids.length} recordings successfully.`, "success");
+
+      setRecordings((prev) =>
+        prev.filter((r) => !selectedIds.has(r.id || "") && !selectedIds.has(r._id || "") && !selectedIds.has(r.call_id))
+      );
+
+      if (
+        selectedRec &&
+        (selectedIds.has(selectedRec.id || "") ||
+          selectedIds.has(selectedRec._id || "") ||
+          selectedIds.has(selectedRec.call_id))
+      ) {
+        setSelectedRec(null);
+        setPlaybackUrl("");
+      }
+
+      setSelectedIds(new Set());
+      setShowBatchDeleteModal(false);
+      loadStats();
+    } catch (err: any) {
+      showToast(err.message || "Failed to delete selected recordings.", "error");
+    } finally {
+      setIsDeleting(false);
+    }
+  };
+
+  // Toggle selection for a single row
+  const toggleSelectRow = (rec: RecordingItem, e: React.MouseEvent) => {
+    e.stopPropagation();
+    const idKey = rec.id || rec._id || rec.call_id;
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(idKey)) {
+        next.delete(idKey);
+      } else {
+        next.add(idKey);
+      }
+      return next;
+    });
+  };
+
+  // Toggle select all on current page
+  const toggleSelectAll = () => {
+    if (selectedIds.size === recordings.length && recordings.length > 0) {
+      setSelectedIds(new Set());
+    } else {
+      const allKeys = recordings.map((r) => r.id || r._id || r.call_id);
+      setSelectedIds(new Set(allKeys));
     }
   };
 
@@ -450,6 +592,27 @@ export default function Recordings() {
     }
   };
 
+  // Purge failed recordings action
+  const handlePurgeFailed = async () => {
+    const failedRecs = recordings.filter((r) => r.status === "FAILED");
+    if (failedRecs.length === 0) {
+      showToast("No failed recordings found to purge.", "info");
+      return;
+    }
+    const failedIds = failedRecs.map((r) => r.id || r._id || r.call_id);
+    setCleaningOrphans(true);
+    try {
+      const res = await api.post("/api/recordings/batch-delete", { recording_ids: failedIds });
+      showToast(`Purged ${res.deleted_count || failedIds.length} failed recordings.`, "success");
+      loadStats();
+      loadRecordings();
+    } catch (err: any) {
+      showToast(err.message || "Failed to purge failed recordings.", "error");
+    } finally {
+      setCleaningOrphans(false);
+    }
+  };
+
   // Preset Date Filter Helpers
   const applyDatePreset = (preset: "today" | "yesterday" | "week" | "all") => {
     const now = new Date();
@@ -496,160 +659,128 @@ export default function Recordings() {
   };
 
   return (
-    <div className="flex-1 flex flex-col min-h-screen bg-slate-950 text-slate-100 selection:bg-amber-500/30 selection:text-amber-200">
-      {/* Top Header */}
-      <header className="sticky top-0 z-20 border-b border-slate-800/80 bg-slate-950/90 backdrop-blur-xl px-6 py-4">
-        <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
-          <div className="flex items-center space-x-3">
-            <div className="h-10 w-10 rounded-xl bg-gradient-to-br from-amber-500 to-amber-700 flex items-center justify-center shadow-lg shadow-amber-500/20 ring-1 ring-amber-400/30">
-              <FileAudio className="h-5 w-5 text-white" />
-            </div>
-            <div>
-              <div className="flex items-center space-x-2">
-                <h1 className="text-xl font-bold tracking-tight text-white flex items-center gap-2">
-                  Voice Call Recordings
-                  <span className="text-xs px-2 py-0.5 rounded-full font-medium bg-cyan-500/10 text-cyan-400 border border-cyan-500/20 flex items-center gap-1">
-                    <Cloud className="h-3 w-3" />
-                    Cloudinary Audio Vault
-                  </span>
-                </h1>
-              </div>
-              <p className="text-xs text-slate-400">
-                Private Cloudinary storage, authenticated signed streaming, role-scoped access & audit logs.
-              </p>
-            </div>
-          </div>
-
-          <div className="flex items-center space-x-2.5">
-            <button
-              onClick={() => {
-                loadStats();
-                loadRecordings();
-              }}
-              disabled={loading}
-              className="inline-flex items-center space-x-2 px-3.5 py-2 text-xs font-semibold rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700/60 shadow-sm transition-all disabled:opacity-50"
-              title="Refresh recordings"
-            >
-              <RefreshCw className={`h-3.5 w-3.5 ${loading ? "animate-spin text-amber-400" : ""}`} />
-              <span>Refresh</span>
-            </button>
-
-            {isAdmin && (
-              <button
-                onClick={() => {
-                  setCleanupResult(null);
-                  setShowCleanupModal(true);
-                }}
-                className="inline-flex items-center space-x-2 px-3.5 py-2 text-xs font-semibold rounded-lg bg-red-950/40 hover:bg-red-900/50 text-red-300 border border-red-800/40 shadow-sm transition-all"
-                title="Scan and clean orphan storage files"
-              >
-                <Trash2 className="h-3.5 w-3.5 text-red-400" />
-                <span>Cleanup Orphans</span>
-              </button>
-            )}
-          </div>
-        </div>
-      </header>
-
+    <div className="flex-1 flex flex-col min-h-screen bg-[#F6F8FB] text-[#111827] font-sans antialiased">
+      {/* ── Main Content Container ────────────────────────────────────────────── */}
       <main className="flex-1 p-6 space-y-6 max-w-7xl w-full mx-auto">
-        {/* Metric Summary Cards */}
-        <div className="grid grid-cols-2 md:grid-cols-5 gap-3.5">
-          <div className="p-4 rounded-xl bg-slate-900/80 border border-slate-800 shadow-sm flex flex-col justify-between">
-            <div className="flex items-center justify-between text-slate-400 text-xs font-medium">
-              <span>Total Recordings</span>
-              <FileAudio className="h-4 w-4 text-slate-400" />
+        {/* ── 5 Clean White KPI Summary Cards ─────────────────────────────────── */}
+        <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
+          {/* 1. Total Recordings */}
+          <div className="bg-white border border-[#E4E7EC] rounded-xl p-4 shadow-xs hover:border-slate-300 transition-all flex flex-col justify-between">
+            <div className="flex items-center justify-between">
+              <span className="text-xs font-semibold text-[#667085]">Total Recordings</span>
+              <div className="h-7 w-7 rounded-lg bg-blue-50 text-blue-600 flex items-center justify-center">
+                <FileAudio className="h-3.5 w-3.5" />
+              </div>
             </div>
-            <div className="text-2xl font-bold text-white mt-2">
+            <div className="text-2xl font-bold text-[#111827] mt-3">
               {statsLoading ? "..." : (stats?.total_recordings ?? totalCount)}
             </div>
-            <div className="text-[11px] text-slate-500 mt-1">
+            <div className="text-[11px] text-[#667085] mt-1 flex items-center gap-1 font-medium">
+              <Activity className="h-3 w-3 text-slate-400" />
               {stats?.total_duration_seconds ? `${Math.round(stats.total_duration_seconds / 60)} min logged` : "Across all pools"}
             </div>
           </div>
 
-          <div className="p-4 rounded-xl bg-slate-900/80 border border-slate-800 shadow-sm flex flex-col justify-between">
-            <div className="flex items-center justify-between text-emerald-400 text-xs font-medium">
-              <span>Ready for Playback</span>
-              <CheckCircle2 className="h-4 w-4 text-emerald-400" />
+          {/* 2. Ready for Playback */}
+          <div className="bg-white border border-[#E4E7EC] rounded-xl p-4 shadow-xs hover:border-slate-300 transition-all flex flex-col justify-between">
+            <div className="flex items-center justify-between">
+              <span className="text-xs font-semibold text-[#667085]">Ready for Playback</span>
+              <div className="h-7 w-7 rounded-lg bg-emerald-50 text-emerald-600 flex items-center justify-center">
+                <CheckCircle2 className="h-3.5 w-3.5" />
+              </div>
             </div>
-            <div className="text-2xl font-bold text-emerald-400 mt-2">
+            <div className="text-2xl font-bold text-[#111827] mt-3">
               {statsLoading ? "..." : (stats?.ready_count ?? 0)}
             </div>
-            <div className="text-[11px] text-emerald-500/70 mt-1">
+            <div className="text-[11px] text-emerald-700 mt-1 font-medium flex items-center gap-1">
+              <span className="h-1.5 w-1.5 rounded-full bg-emerald-500"></span>
               Signed URL streamable
             </div>
           </div>
 
-          <div className="p-4 rounded-xl bg-slate-900/80 border border-slate-800 shadow-sm flex flex-col justify-between">
-            <div className="flex items-center justify-between text-amber-400 text-xs font-medium">
-              <span>Processing</span>
-              <Clock className="h-4 w-4 text-amber-400" />
+          {/* 3. Processing */}
+          <div className="bg-white border border-[#E4E7EC] rounded-xl p-4 shadow-xs hover:border-slate-300 transition-all flex flex-col justify-between">
+            <div className="flex items-center justify-between">
+              <span className="text-xs font-semibold text-[#667085]">Processing</span>
+              <div className="h-7 w-7 rounded-lg bg-amber-50 text-amber-600 flex items-center justify-center">
+                <Clock className="h-3.5 w-3.5" />
+              </div>
             </div>
-            <div className="text-2xl font-bold text-amber-400 mt-2 flex items-center gap-1.5">
+            <div className="text-2xl font-bold text-[#111827] mt-3 flex items-center gap-2">
               {statsLoading ? "..." : (stats?.processing_count ?? 0)}
               {(stats?.processing_count ?? 0) > 0 && (
-                <span className="inline-block h-2 w-2 rounded-full bg-amber-400 animate-ping" />
+                <span className="inline-block h-2 w-2 rounded-full bg-amber-500 animate-ping" />
               )}
             </div>
-            <div className="text-[11px] text-amber-500/70 mt-1">
+            <div className="text-[11px] text-amber-700 mt-1 font-medium flex items-center gap-1">
+              <span className="h-1.5 w-1.5 rounded-full bg-amber-500"></span>
               Cloudinary uploading
             </div>
           </div>
 
-          <div className="p-4 rounded-xl bg-slate-900/80 border border-slate-800 shadow-sm flex flex-col justify-between">
-            <div className="flex items-center justify-between text-rose-400 text-xs font-medium">
-              <span>Failed / Retries</span>
-              <AlertCircle className="h-4 w-4 text-rose-400" />
+          {/* 4. Failed / Retries */}
+          <div className="bg-white border border-[#E4E7EC] rounded-xl p-4 shadow-xs hover:border-slate-300 transition-all flex flex-col justify-between">
+            <div className="flex items-center justify-between">
+              <span className="text-xs font-semibold text-[#667085]">Failed / Retries</span>
+              <div className="h-7 w-7 rounded-lg bg-rose-50 text-rose-600 flex items-center justify-center">
+                <AlertCircle className="h-3.5 w-3.5" />
+              </div>
             </div>
-            <div className="text-2xl font-bold text-rose-400 mt-2">
+            <div className="text-2xl font-bold text-[#111827] mt-3">
               {statsLoading ? "..." : (stats?.failed_count ?? 0)}
             </div>
-            <div className="text-[11px] text-rose-500/70 mt-1">
+            <div className="text-[11px] text-rose-700 mt-1 font-medium flex items-center gap-1">
+              <span className="h-1.5 w-1.5 rounded-full bg-rose-500"></span>
               Manual retry available
             </div>
           </div>
 
-          <div className="p-4 rounded-xl bg-slate-900/80 border border-slate-800 shadow-sm flex flex-col justify-between">
-            <div className="flex items-center justify-between text-cyan-400 text-xs font-medium">
-              <span>Cloud Storage</span>
-              <Cloud className="h-4 w-4 text-cyan-400" />
+          {/* 5. Cloud Storage */}
+          <div className="bg-white border border-[#E4E7EC] rounded-xl p-4 shadow-xs hover:border-slate-300 transition-all flex flex-col justify-between">
+            <div className="flex items-center justify-between">
+              <span className="text-xs font-semibold text-[#667085]">Cloud Storage</span>
+              <div className="h-7 w-7 rounded-lg bg-sky-50 text-sky-600 flex items-center justify-center">
+                <Cloud className="h-3.5 w-3.5" />
+              </div>
             </div>
-            <div className="text-2xl font-bold text-cyan-400 mt-2">
+            <div className="text-2xl font-bold text-[#111827] mt-3">
               {statsLoading ? "..." : `${stats?.total_size_mb ?? 0} MB`}
             </div>
-            <div className="text-[11px] text-cyan-500/70 mt-1">
-              Resource: Video / Authenticated
+            <div className="text-[11px] text-sky-700 mt-1 font-medium flex items-center gap-1">
+              <span className="h-1.5 w-1.5 rounded-full bg-sky-500"></span>
+              Video / Authenticated
             </div>
           </div>
         </div>
 
-        {/* Filter Controls Bar */}
-        <div className="p-4 rounded-xl bg-slate-900/90 border border-slate-800/80 shadow-md space-y-4">
+        {/* ── Enterprise Filter Panel ─────────────────────────────────────────── */}
+        <div className="bg-white border border-[#E4E7EC] rounded-xl p-4 shadow-xs space-y-3.5">
+          {/* Primary Filter Row */}
           <div className="grid grid-cols-1 md:grid-cols-12 gap-3 items-center">
             {/* Search Input */}
             <div className="md:col-span-4 relative">
-              <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-500" />
+              <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-400" />
               <input
                 type="text"
-                placeholder="Search Call ID, Lead, Phone, Agent, Notes..."
+                placeholder="Search Call ID, Lead, Phone, Agent, Note..."
                 value={searchQuery}
                 onChange={(e) => {
                   setSearchQuery(e.target.value);
                   setPage(1);
                 }}
-                className="w-full pl-10 pr-8 py-2 text-xs bg-slate-950 border border-slate-700/80 rounded-lg text-slate-100 placeholder-slate-500 focus:outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500/30 transition-all"
+                className="w-full pl-10 pr-8 py-2 text-xs bg-slate-50 hover:bg-slate-100/60 focus:bg-white border border-[#E4E7EC] rounded-xl text-[#111827] placeholder-slate-400 focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/10 transition-all font-medium"
               />
               {searchQuery && (
                 <button
                   onClick={() => setSearchQuery("")}
-                  className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white"
+                  className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 p-1"
                 >
                   <X className="h-3.5 w-3.5" />
                 </button>
               )}
             </div>
 
-            {/* Agent Filter */}
+            {/* Agent Dropdown */}
             <div className="md:col-span-3">
               <CustomSelect
                 options={agents}
@@ -662,7 +793,7 @@ export default function Recordings() {
               />
             </div>
 
-            {/* Disposition Filter */}
+            {/* Disposition Dropdown */}
             <div className="md:col-span-3">
               <CustomSelect
                 options={DISPOSITION_OPTIONS}
@@ -675,8 +806,33 @@ export default function Recordings() {
               />
             </div>
 
-            {/* Quick Reset Filters */}
-            <div className="md:col-span-2 flex justify-end">
+            {/* Actions: Refresh, Cleanup & Reset Buttons */}
+            <div className="md:col-span-2 flex items-center justify-end gap-2">
+              <button
+                onClick={() => {
+                  loadStats();
+                  loadRecordings();
+                }}
+                disabled={loading}
+                className="p-2 rounded-xl bg-white hover:bg-slate-50 text-slate-700 border border-[#E4E7EC] shadow-xs transition-all active:scale-[0.98] disabled:opacity-50 cursor-pointer shrink-0"
+                title="Refresh recordings"
+              >
+                <RefreshCw className={`h-4 w-4 ${loading ? "animate-spin text-blue-600" : "text-slate-500"}`} />
+              </button>
+
+              {isAdmin && (
+                <button
+                  onClick={() => {
+                    setCleanupResult(null);
+                    setShowCleanupModal(true);
+                  }}
+                  className="p-2 rounded-xl bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200/80 shadow-xs transition-all active:scale-[0.98] cursor-pointer shrink-0"
+                  title="Scan and clean orphan storage files"
+                >
+                  <Trash2 className="h-4 w-4 text-rose-600" />
+                </button>
+              )}
+
               <button
                 onClick={() => {
                   setSearchQuery("");
@@ -687,19 +843,19 @@ export default function Recordings() {
                   setDateTo("");
                   setPage(1);
                 }}
-                className="w-full py-2 px-3 text-xs font-semibold rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700/80 transition-all text-center"
+                className="w-full py-2 px-3 text-xs font-semibold rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-200 transition-all text-center cursor-pointer shadow-2xs active:scale-[0.98]"
               >
-                Reset All Filters
+                Reset Filters
               </button>
             </div>
           </div>
 
-          {/* Secondary Row: Status Pills & Date Presets */}
-          <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3 pt-2 border-t border-slate-800/60">
-            {/* Status Pills */}
-            <div className="flex items-center space-x-1.5 overflow-x-auto pb-1">
-              <span className="text-xs text-slate-400 font-medium mr-1.5 flex items-center gap-1">
-                <Filter className="h-3 w-3 text-slate-500" />
+          {/* Secondary Filter Row: Segmented Status Pills + Date Range */}
+          <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3 pt-3 border-t border-[#E4E7EC]">
+            {/* Status Segmented Control */}
+            <div className="flex items-center space-x-1 overflow-x-auto pb-1 bg-slate-100/80 p-1 rounded-xl border border-slate-200/60 self-start lg:self-auto">
+              <span className="text-[11px] text-[#667085] font-semibold px-2 flex items-center gap-1">
+                <Filter className="h-3 w-3 text-slate-400" />
                 Status:
               </span>
               {STATUS_FILTERS.map((st) => (
@@ -709,10 +865,10 @@ export default function Recordings() {
                     setStatusFilter(st.id);
                     setPage(1);
                   }}
-                  className={`px-3 py-1 rounded-full text-xs font-medium whitespace-nowrap transition-all ${
+                  className={`px-3 py-1 rounded-lg text-xs font-semibold whitespace-nowrap transition-all cursor-pointer ${
                     statusFilter === st.id
-                      ? "bg-amber-500 text-slate-950 font-bold shadow-sm shadow-amber-500/20"
-                      : "bg-slate-800/80 text-slate-400 hover:text-slate-200 hover:bg-slate-800"
+                      ? "bg-white text-blue-700 shadow-xs border border-slate-200 font-bold"
+                      : "text-slate-600 hover:text-slate-900 hover:bg-slate-200/60"
                   }`}
                 >
                   {st.label}
@@ -720,9 +876,10 @@ export default function Recordings() {
               ))}
             </div>
 
-            {/* Date Filters & Presets */}
-            <div className="flex items-center space-x-2 text-xs">
-              <div className="flex items-center space-x-1">
+            {/* Date Range Inputs & Quick Shortcuts */}
+            <div className="flex flex-wrap items-center gap-2 text-xs">
+              <div className="flex items-center space-x-1.5 bg-slate-50 border border-[#E4E7EC] rounded-xl px-2.5 py-1">
+                <Calendar className="h-3.5 w-3.5 text-slate-400" />
                 <input
                   type="date"
                   value={dateFrom}
@@ -730,9 +887,9 @@ export default function Recordings() {
                     setDateFrom(e.target.value);
                     setPage(1);
                   }}
-                  className="bg-slate-950 border border-slate-700/80 rounded-md px-2 py-1 text-slate-200 text-xs focus:outline-none focus:border-amber-500"
+                  className="bg-transparent text-slate-800 text-xs focus:outline-none font-medium"
                 />
-                <span className="text-slate-500">to</span>
+                <span className="text-slate-400 font-medium">to</span>
                 <input
                   type="date"
                   value={dateTo}
@@ -740,26 +897,26 @@ export default function Recordings() {
                     setDateTo(e.target.value);
                     setPage(1);
                   }}
-                  className="bg-slate-950 border border-slate-700/80 rounded-md px-2 py-1 text-slate-200 text-xs focus:outline-none focus:border-amber-500"
+                  className="bg-transparent text-slate-800 text-xs focus:outline-none font-medium"
                 />
               </div>
 
               <div className="flex items-center space-x-1">
                 <button
                   onClick={() => applyDatePreset("today")}
-                  className="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-[11px] text-slate-300 font-medium"
+                  className="px-2.5 py-1 rounded-lg bg-slate-100 hover:bg-slate-200 text-[11px] text-slate-700 font-semibold border border-slate-200/80 transition-all cursor-pointer"
                 >
                   Today
                 </button>
                 <button
                   onClick={() => applyDatePreset("yesterday")}
-                  className="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-[11px] text-slate-300 font-medium"
+                  className="px-2.5 py-1 rounded-lg bg-slate-100 hover:bg-slate-200 text-[11px] text-slate-700 font-semibold border border-slate-200/80 transition-all cursor-pointer"
                 >
                   Yesterday
                 </button>
                 <button
                   onClick={() => applyDatePreset("week")}
-                  className="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-[11px] text-slate-300 font-medium"
+                  className="px-2.5 py-1 rounded-lg bg-slate-100 hover:bg-slate-200 text-[11px] text-slate-700 font-semibold border border-slate-200/80 transition-all cursor-pointer"
                 >
                   7 Days
                 </button>
@@ -768,132 +925,188 @@ export default function Recordings() {
           </div>
         </div>
 
-        {/* Main Content Area: Recordings List & Player Inspector */}
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-          {/* Recordings Table / List */}
+        {/* ── Selection / Bulk Actions Floating Bar ──────────────────────────── */}
+        {selectedIds.size > 0 && (
+          <div className="bg-blue-50 border border-blue-200 rounded-xl p-3 shadow-xs flex items-center justify-between text-xs animate-fadeIn">
+            <div className="flex items-center space-x-2 text-blue-900 font-semibold">
+              <span className="h-2 w-2 rounded-full bg-blue-600 animate-pulse" />
+              <span>
+                <strong className="font-bold">{selectedIds.size}</strong> recording{selectedIds.size > 1 ? "s" : ""} selected
+              </span>
+            </div>
+            <div className="flex items-center space-x-2">
+              <button
+                onClick={() => setSelectedIds(new Set())}
+                className="px-3 py-1.5 rounded-lg bg-white hover:bg-slate-100 text-slate-700 border border-slate-200 font-semibold transition-all cursor-pointer"
+              >
+                Clear Selection
+              </button>
+              {isSupervisor && (
+                <button
+                  onClick={() => setShowBatchDeleteModal(true)}
+                  className="px-3 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-700 text-white font-bold flex items-center gap-1.5 shadow-xs transition-all cursor-pointer"
+                >
+                  <Trash2 className="h-3.5 w-3.5" />
+                  <span>Delete Selected ({selectedIds.size})</span>
+                </button>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* ── Main Split View: Recordings Table + Detail Drawer ──────────────── */}
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+          {/* Left Table Section */}
           <div className={`${selectedRec ? "lg:col-span-7" : "lg:col-span-12"} space-y-4`}>
-            <div className="rounded-xl border border-slate-800 bg-slate-900/60 overflow-hidden shadow-sm">
+            <div className="bg-white border border-[#E4E7EC] rounded-xl shadow-xs overflow-hidden">
               <div className="overflow-x-auto">
                 <table className="w-full text-left text-xs border-collapse">
                   <thead>
-                    <tr className="border-b border-slate-800 bg-slate-950/60 text-slate-400 font-semibold uppercase tracking-wider text-[10px]">
-                      <th className="px-4 py-3">Call ID / Lead</th>
-                      <th className="px-4 py-3">Agent</th>
-                      <th className="px-4 py-3">Date & Duration</th>
-                      <th className="px-4 py-3">Outcome</th>
-                      <th className="px-4 py-3">Storage / Status</th>
-                      <th className="px-4 py-3 text-right">Actions</th>
+                    <tr className="border-b border-[#E4E7EC] bg-slate-50/80 text-[#667085] font-bold uppercase tracking-wider text-[10px]">
+                      {isSupervisor && (
+                        <th className="px-3 py-3.5 w-8 text-center">
+                          <input
+                            type="checkbox"
+                            checked={recordings.length > 0 && selectedIds.size === recordings.length}
+                            onChange={toggleSelectAll}
+                            className="rounded border-slate-300 text-blue-600 focus:ring-blue-500 cursor-pointer h-3.5 w-3.5"
+                            title="Select / Deselect all"
+                          />
+                        </th>
+                      )}
+                      <th className="px-4 py-3.5">Call ID / Lead</th>
+                      <th className="px-4 py-3.5">Agent</th>
+                      <th className="px-4 py-3.5">Date & Duration</th>
+                      <th className="px-4 py-3.5">Outcome</th>
+                      <th className="px-4 py-3.5">Storage / Status</th>
+                      <th className="px-4 py-3.5 text-right">Actions</th>
                     </tr>
                   </thead>
-                  <tbody className="divide-y divide-slate-800/60 text-slate-300">
+                  <tbody className="divide-y divide-[#E4E7EC] text-slate-700">
                     {loading ? (
                       <tr>
-                        <td colSpan={6} className="text-center py-12 text-slate-500">
-                          <div className="flex flex-col items-center justify-center space-y-2">
-                            <RefreshCw className="h-6 w-6 animate-spin text-amber-500" />
-                            <span>Loading call recordings...</span>
+                        <td colSpan={isSupervisor ? 7 : 6} className="text-center py-16 text-slate-500">
+                          <div className="flex flex-col items-center justify-center space-y-2.5">
+                            <RefreshCw className="h-6 w-6 animate-spin text-blue-600" />
+                            <span className="font-semibold text-xs text-slate-600">Loading call recordings...</span>
                           </div>
                         </td>
                       </tr>
                     ) : recordings.length === 0 ? (
                       <tr>
-                        <td colSpan={6} className="text-center py-12 text-slate-500">
-                          <FileAudio className="h-8 w-8 mx-auto text-slate-600 mb-2" />
-                          <p className="text-sm font-medium text-slate-400">No call recordings found</p>
-                          <p className="text-xs text-slate-600 mt-1">Try changing your search query or filter parameters.</p>
+                        <td colSpan={isSupervisor ? 7 : 6} className="text-center py-16 text-slate-500">
+                          <FileAudio className="h-10 w-10 mx-auto text-slate-300 mb-2.5" />
+                          <p className="text-sm font-bold text-slate-700">No call recordings found</p>
+                          <p className="text-xs text-[#667085] mt-1">Try changing your search query or filter parameters.</p>
                         </td>
                       </tr>
                     ) : (
                       recordings.map((rec) => {
+                        const recKey = rec.id || rec._id || rec.call_id;
                         const isSelected = selectedRec && ((selectedRec.id || selectedRec._id) === (rec.id || rec._id) || selectedRec.call_id === rec.call_id);
+                        const isChecked = selectedIds.has(recKey);
+
                         return (
                           <tr
-                            key={rec.id || rec._id || rec.call_id}
+                            key={recKey}
                             onClick={() => handleSelectRecording(rec)}
                             className={`cursor-pointer transition-colors ${
                               isSelected
-                                ? "bg-amber-500/10 border-l-4 border-l-amber-500"
-                                : "hover:bg-slate-800/40"
+                                ? "bg-blue-50/70 border-l-4 border-l-blue-600"
+                                : isChecked
+                                ? "bg-slate-50"
+                                : "hover:bg-slate-50/80"
                             }`}
                           >
-                            <td className="px-4 py-3">
-                              <div className="font-semibold text-white flex items-center gap-1.5">
+                            {isSupervisor && (
+                              <td className="px-3 py-3.5 text-center" onClick={(e) => e.stopPropagation()}>
+                                <input
+                                  type="checkbox"
+                                  checked={isChecked}
+                                  onChange={(e) => toggleSelectRow(rec, e as any)}
+                                  className="rounded border-slate-300 text-blue-600 focus:ring-blue-500 cursor-pointer h-3.5 w-3.5"
+                                />
+                              </td>
+                            )}
+
+                            <td className="px-4 py-3.5">
+                              <div className="font-bold text-[#111827] flex items-center gap-1.5">
                                 {rec.customer_name || "Customer"}
                               </div>
-                              <div className="text-[11px] text-slate-400 font-mono flex items-center gap-1 mt-0.5">
+                              <div className="text-[11px] text-[#667085] font-mono flex items-center gap-1.5 mt-0.5">
                                 <span>{rec.masked_phone || "****"}</span>
-                                <span className="text-slate-600">•</span>
+                                <span className="text-slate-300">•</span>
                                 <span className="text-slate-500" title={rec.call_id}>
                                   {rec.call_id?.slice(0, 10)}...
                                 </span>
                               </div>
                             </td>
 
-                            <td className="px-4 py-3">
-                              <div className="text-slate-200 font-medium">{rec.agent_name || "Agent"}</div>
-                              <div className="text-[10px] text-slate-500 capitalize">{rec.pool_id || "General"}</div>
+                            <td className="px-4 py-3.5">
+                              <div className="text-[#111827] font-semibold">{rec.agent_name || "Agent"}</div>
+                              <div className="text-[10px] text-[#667085] capitalize">{rec.pool_id || "General"}</div>
                             </td>
 
-                            <td className="px-4 py-3">
-                              <div className="text-slate-200 font-medium">
+                            <td className="px-4 py-3.5">
+                              <div className="text-slate-800 font-medium">
                                 {rec.call_start_time ? new Date(rec.call_start_time).toLocaleDateString("en-IN", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }) : "N/A"}
                               </div>
-                              <div className="text-[11px] text-amber-400/90 font-mono mt-0.5">
+                              <div className="text-[11px] text-blue-700 font-mono font-bold mt-0.5">
                                 {formatSeconds(rec.duration_seconds || rec.duration || 0)}
                               </div>
                             </td>
 
-                            <td className="px-4 py-3">
-                              <span className="inline-block px-2 py-0.5 rounded text-[10px] font-semibold uppercase tracking-wider bg-slate-800 text-slate-300 border border-slate-700/60">
+                            <td className="px-4 py-3.5">
+                              <span className="inline-block px-2.5 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider bg-slate-100 text-slate-700 border border-slate-200">
                                 {rec.call_outcome || "Completed"}
                               </span>
                             </td>
 
-                            <td className="px-4 py-3">
+                            <td className="px-4 py-3.5">
                               <div className="flex flex-col gap-1 items-start">
                                 {rec.status === "READY" && (
-                                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
-                                    <CheckCircle2 className="h-3 w-3" />
+                                  <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-emerald-50 text-emerald-700 border border-emerald-200">
+                                    <CheckCircle2 className="h-3 w-3 text-emerald-600" />
                                     READY
                                   </span>
                                 )}
                                 {rec.status === "PROCESSING" && (
-                                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-amber-500/10 text-amber-400 border border-amber-500/20 animate-pulse">
-                                    <Clock className="h-3 w-3" />
+                                  <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-amber-50 text-amber-700 border border-amber-200 animate-pulse">
+                                    <Clock className="h-3 w-3 text-amber-600" />
                                     PROCESSING
                                   </span>
                                 )}
                                 {rec.status === "RECORDING" && (
-                                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-rose-500/10 text-rose-400 border border-rose-500/20">
-                                    <Radio className="h-3 w-3 animate-pulse" />
+                                  <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-blue-50 text-blue-700 border border-blue-200">
+                                    <Radio className="h-3 w-3 text-blue-600 animate-pulse" />
                                     RECORDING
                                   </span>
                                 )}
                                 {rec.status === "FAILED" && (
-                                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-red-500/10 text-red-400 border border-red-500/20">
-                                    <AlertCircle className="h-3 w-3" />
+                                  <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-rose-50 text-rose-700 border border-rose-200">
+                                    <AlertCircle className="h-3 w-3 text-rose-600" />
                                     FAILED
                                   </span>
                                 )}
                                 {rec.public_id && (
-                                  <span className="text-[9px] font-mono text-cyan-400/80 flex items-center gap-0.5 truncate max-w-[130px]" title={rec.public_id}>
-                                    <Cloud className="h-2.5 w-2.5 shrink-0" />
+                                  <span className="text-[9px] font-mono text-[#667085] flex items-center gap-1 truncate max-w-[130px]" title={rec.public_id}>
+                                    <Cloud className="h-2.5 w-2.5 text-blue-500 shrink-0" />
                                     {rec.public_id.split("/").pop()}
                                   </span>
                                 )}
                               </div>
                             </td>
 
-                            <td className="px-4 py-3 text-right">
+                            <td className="px-4 py-3.5 text-right">
                               <div className="flex items-center justify-end space-x-1.5">
                                 {rec.status === "FAILED" && isSupervisor && (
                                   <button
                                     onClick={(e) => handleRetry(rec, e)}
-                                    disabled={retryingId === (rec.id || rec._id || rec.call_id)}
-                                    className="p-1 rounded bg-amber-500/20 text-amber-300 hover:bg-amber-500/30 transition-all"
+                                    disabled={retryingId === recKey}
+                                    className="p-1.5 rounded-lg bg-amber-50 text-amber-700 hover:bg-amber-100 border border-amber-200 transition-all cursor-pointer"
                                     title="Retry Cloudinary upload"
                                   >
-                                    <RotateCw className={`h-3.5 w-3.5 ${retryingId === (rec.id || rec._id || rec.call_id) ? "animate-spin" : ""}`} />
+                                    <RotateCw className={`h-3.5 w-3.5 ${retryingId === recKey ? "animate-spin" : ""}`} />
                                   </button>
                                 )}
 
@@ -903,14 +1116,27 @@ export default function Recordings() {
                                       e.stopPropagation();
                                       handleDownload(rec);
                                     }}
-                                    className="p-1 rounded bg-slate-800 text-slate-300 hover:bg-slate-700 hover:text-white transition-all"
+                                    className="p-1.5 rounded-lg bg-slate-100 text-slate-700 hover:bg-slate-200 border border-slate-200 transition-all cursor-pointer"
                                     title="Download recording"
                                   >
                                     <Download className="h-3.5 w-3.5" />
                                   </button>
                                 )}
 
-                                <ChevronRight className="h-4 w-4 text-slate-500" />
+                                {isSupervisor && (
+                                  <button
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      setRecordingToDelete(rec);
+                                    }}
+                                    className="p-1.5 rounded-lg bg-white hover:bg-rose-50 text-slate-400 hover:text-rose-600 border border-[#E4E7EC] hover:border-rose-200 shadow-2xs transition-all cursor-pointer"
+                                    title="Delete recording"
+                                  >
+                                    <Trash2 className="h-3.5 w-3.5" />
+                                  </button>
+                                )}
+
+                                <ChevronRight className="h-4 w-4 text-slate-400" />
                               </div>
                             </td>
                           </tr>
@@ -921,26 +1147,26 @@ export default function Recordings() {
                 </table>
               </div>
 
-              {/* Pagination controls */}
-              <div className="px-4 py-3 border-t border-slate-800 bg-slate-950/40 flex items-center justify-between text-xs text-slate-400">
-                <div>
-                  Showing <span className="font-semibold text-slate-200">{recordings.length}</span> of <span className="font-semibold text-slate-200">{totalCount}</span> recordings
+              {/* Pagination Controls */}
+              <div className="px-4 py-3 border-t border-[#E4E7EC] bg-slate-50/60 flex items-center justify-between text-xs text-[#667085]">
+                <div className="font-medium">
+                  Showing <span className="font-bold text-[#111827]">{recordings.length}</span> of <span className="font-bold text-[#111827]">{totalCount}</span> recordings
                 </div>
                 <div className="flex items-center space-x-2">
                   <button
                     onClick={() => setPage((p) => Math.max(1, p - 1))}
                     disabled={page <= 1 || loading}
-                    className="px-2.5 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 disabled:opacity-40"
+                    className="px-3 py-1 rounded-lg bg-white hover:bg-slate-100 text-slate-700 border border-[#E4E7EC] font-semibold shadow-xs disabled:opacity-40 cursor-pointer"
                   >
                     Previous
                   </button>
-                  <span>
-                    Page <span className="text-slate-200 font-semibold">{page}</span> / {totalPages}
+                  <span className="font-medium">
+                    Page <span className="text-[#111827] font-bold">{page}</span> / {totalPages}
                   </span>
                   <button
                     onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
                     disabled={page >= totalPages || loading}
-                    className="px-2.5 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 disabled:opacity-40"
+                    className="px-3 py-1 rounded-lg bg-white hover:bg-slate-100 text-slate-700 border border-[#E4E7EC] font-semibold shadow-xs disabled:opacity-40 cursor-pointer"
                   >
                     Next
                   </button>
@@ -949,24 +1175,24 @@ export default function Recordings() {
             </div>
           </div>
 
-          {/* Call Details & Audio Player Panel */}
+          {/* ── Right Inspector & Audio Player Drawer ─────────────────────────── */}
           {selectedRec && (
-            <div className="lg:col-span-5 rounded-xl border border-slate-800 bg-slate-900 shadow-xl flex flex-col overflow-hidden max-h-[85vh]">
-              {/* Panel Header */}
-              <div className="p-4 border-b border-slate-800 bg-slate-950/70 flex items-center justify-between">
-                <div className="flex items-center space-x-2.5">
-                  <div className="h-8 w-8 rounded-lg bg-amber-500/20 text-amber-400 flex items-center justify-center">
+            <div className="lg:col-span-5 bg-white border border-[#E4E7EC] rounded-xl shadow-md flex flex-col overflow-hidden max-h-[85vh] sticky top-24">
+              {/* Detail Header */}
+              <div className="p-4 border-b border-[#E4E7EC] bg-slate-50/50 flex items-center justify-between">
+                <div className="flex items-center space-x-3">
+                  <div className="h-9 w-9 rounded-xl bg-blue-50 border border-blue-100 text-blue-600 flex items-center justify-center shrink-0">
                     <Mic className="h-4 w-4" />
                   </div>
                   <div>
-                    <h2 className="text-sm font-bold text-white flex items-center gap-1.5">
+                    <h2 className="text-sm font-bold text-[#111827] flex items-center gap-1.5">
                       {selectedRec.customer_name || "Customer Call"}
-                      <span className="text-[10px] px-1.5 py-0.5 rounded font-mono bg-slate-800 text-slate-300 border border-slate-700">
+                      <span className="text-[10px] px-2 py-0.5 rounded-full font-mono font-semibold bg-slate-100 text-slate-700 border border-slate-200">
                         {selectedRec.masked_phone || "****"}
                       </span>
                     </h2>
-                    <p className="text-[11px] text-slate-400">
-                      Handled by <span className="text-slate-200 font-medium">{selectedRec.agent_name || "Agent"}</span>
+                    <p className="text-[11px] text-[#667085] mt-0.5">
+                      Handled by <span className="text-slate-900 font-semibold">{selectedRec.agent_name || "Agent"}</span>
                     </p>
                   </div>
                 </div>
@@ -975,71 +1201,82 @@ export default function Recordings() {
                   {isSupervisor && selectedRec.status === "READY" && (
                     <button
                       onClick={() => handleDownload(selectedRec)}
-                      className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white transition-all"
+                      className="p-1.5 rounded-lg bg-white hover:bg-slate-100 text-slate-700 border border-[#E4E7EC] shadow-xs transition-all cursor-pointer"
                       title="Download Recording"
                     >
                       <Download className="h-4 w-4" />
                     </button>
                   )}
+                  {isSupervisor && (
+                    <button
+                      onClick={() => setRecordingToDelete(selectedRec)}
+                      className="p-1.5 rounded-lg bg-white hover:bg-rose-50 text-slate-400 hover:text-rose-600 border border-[#E4E7EC] hover:border-rose-200 shadow-xs transition-all cursor-pointer"
+                      title="Delete Recording"
+                    >
+                      <Trash2 className="h-4 w-4" />
+                    </button>
+                  )}
                   <button
                     onClick={() => setSelectedRec(null)}
-                    className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-white transition-all"
+                    className="p-1.5 rounded-lg bg-white hover:bg-slate-100 text-slate-500 hover:text-slate-900 border border-[#E4E7EC] shadow-xs transition-all cursor-pointer"
+                    title="Close Inspector"
                   >
                     <X className="h-4 w-4" />
                   </button>
                 </div>
               </div>
 
-              {/* Inspector Navigation Tabs */}
-              <div className="flex border-b border-slate-800 bg-slate-950/40 text-xs">
+              {/* Navigation Tabs */}
+              <div className="flex border-b border-[#E4E7EC] bg-slate-50/60 text-xs">
                 <button
                   onClick={() => setActiveTab("player")}
-                  className={`flex-1 py-2.5 px-3 font-semibold text-center border-b-2 transition-all ${
+                  className={`flex-1 py-2.5 px-3 font-bold text-center border-b-2 transition-all cursor-pointer ${
                     activeTab === "player"
-                      ? "border-amber-500 text-amber-400 bg-amber-500/5"
-                      : "border-transparent text-slate-400 hover:text-slate-200"
+                      ? "border-blue-600 text-blue-600 bg-white"
+                      : "border-transparent text-[#667085] hover:text-slate-900 hover:bg-slate-100/50"
                   }`}
                 >
                   Player & Audio
                 </button>
                 <button
                   onClick={() => setActiveTab("metadata")}
-                  className={`flex-1 py-2.5 px-3 font-semibold text-center border-b-2 transition-all ${
+                  className={`flex-1 py-2.5 px-3 font-bold text-center border-b-2 transition-all cursor-pointer ${
                     activeTab === "metadata"
-                      ? "border-amber-500 text-amber-400 bg-amber-500/5"
-                      : "border-transparent text-slate-400 hover:text-slate-200"
+                      ? "border-blue-600 text-blue-600 bg-white"
+                      : "border-transparent text-[#667085] hover:text-slate-900 hover:bg-slate-100/50"
                   }`}
                 >
                   Cloudinary Asset
                 </button>
                 <button
                   onClick={() => setActiveTab("transcript")}
-                  className={`flex-1 py-2.5 px-3 font-semibold text-center border-b-2 transition-all ${
+                  className={`flex-1 py-2.5 px-3 font-bold text-center border-b-2 transition-all cursor-pointer ${
                     activeTab === "transcript"
-                      ? "border-amber-500 text-amber-400 bg-amber-500/5"
-                      : "border-transparent text-slate-400 hover:text-slate-200"
+                      ? "border-blue-600 text-blue-600 bg-white"
+                      : "border-transparent text-[#667085] hover:text-slate-900 hover:bg-slate-100/50"
                   }`}
                 >
                   AI Transcript
                 </button>
                 <button
                   onClick={() => setActiveTab("events")}
-                  className={`flex-1 py-2.5 px-3 font-semibold text-center border-b-2 transition-all ${
+                  className={`flex-1 py-2.5 px-3 font-bold text-center border-b-2 transition-all cursor-pointer ${
                     activeTab === "events"
-                      ? "border-amber-500 text-amber-400 bg-amber-500/5"
-                      : "border-transparent text-slate-400 hover:text-slate-200"
+                      ? "border-blue-600 text-blue-600 bg-white"
+                      : "border-transparent text-[#667085] hover:text-slate-900 hover:bg-slate-100/50"
                   }`}
                 >
                   Timeline
                 </button>
               </div>
 
-              {/* Tab Content */}
+              {/* Tab Content Panels */}
               <div className="flex-1 p-4 overflow-y-auto space-y-4">
+                {/* ── TAB 1: PLAYER & AUDIO ───────────────────────────────────── */}
                 {activeTab === "player" && (
                   <div className="space-y-4">
                     {/* Audio Player Card */}
-                    <div className="p-4 rounded-xl bg-slate-950/80 border border-slate-800 shadow-inner space-y-4">
+                    <div className="p-4 rounded-xl bg-slate-50 border border-[#E4E7EC] shadow-xs space-y-4">
                       {/* Hidden HTML5 Audio Element with Cloudinary Signed / Streaming Source */}
                       <audio
                         ref={audioRef}
@@ -1068,15 +1305,15 @@ export default function Recordings() {
                         onError={(e) => {
                           console.error(`[PLAYER] audioUrl: ${playbackUrl || getStreamFallbackUrl(selectedRec)} | canPlay: false | duration: 0 | loadError: Audio stream unavailable`);
                           setAudioLoading(false);
-                          setAudioError("Audio playback connecting. Retrying signed source...");
+                          setAudioError("Audio stream is currently processing or unavailable.");
                         }}
                       />
 
-                      {/* Waveform / Scrubber bar */}
+                      {/* Scrubber / Progress Bar */}
                       <div className="space-y-1.5">
-                        <div className="flex items-center justify-between text-xs font-mono text-slate-400">
-                          <span className="text-amber-400 font-semibold">{formatSeconds(currentTime)}</span>
-                          <span>{formatSeconds(audioDuration || selectedRec.duration_seconds || selectedRec.duration || 0)}</span>
+                        <div className="flex items-center justify-between text-xs font-mono font-semibold">
+                          <span className="text-blue-600">{formatSeconds(currentTime)}</span>
+                          <span className="text-[#667085]">{formatSeconds(audioDuration || selectedRec.duration_seconds || selectedRec.duration || 0)}</span>
                         </div>
                         <input
                           type="range"
@@ -1086,17 +1323,17 @@ export default function Recordings() {
                           value={currentTime}
                           onChange={handleSeek}
                           disabled={selectedRec.status !== "READY"}
-                          className="w-full h-2 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-amber-500 disabled:opacity-40"
+                          className="w-full h-2 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-blue-600 disabled:opacity-40"
                         />
                       </div>
 
                       {/* Primary Playback Controls */}
-                      <div className="flex items-center justify-between pt-2">
+                      <div className="flex items-center justify-between pt-1 flex-wrap gap-2">
                         <div className="flex items-center space-x-2">
                           <button
                             onClick={() => handleSkip(-10)}
                             disabled={selectedRec.status !== "READY"}
-                            className="p-2 rounded-lg bg-slate-900 hover:bg-slate-800 text-slate-300 hover:text-white transition-all disabled:opacity-40"
+                            className="p-2 rounded-xl bg-white hover:bg-slate-100 text-slate-700 border border-[#E4E7EC] shadow-xs transition-all disabled:opacity-40 cursor-pointer"
                             title="Rewind 10 seconds"
                           >
                             <RotateCcw className="h-4 w-4" />
@@ -1105,11 +1342,11 @@ export default function Recordings() {
                           <button
                             onClick={togglePlay}
                             disabled={selectedRec.status !== "READY"}
-                            className="h-11 w-11 rounded-xl bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-400 hover:to-amber-500 text-slate-950 flex items-center justify-center font-bold shadow-lg shadow-amber-500/20 transition-all disabled:opacity-40 disabled:pointer-events-none"
+                            className="h-11 w-11 rounded-xl bg-gradient-to-r from-blue-600 to-blue-700 hover:from-blue-500 hover:to-blue-600 text-white flex items-center justify-center font-bold shadow-md shadow-blue-500/20 transition-all disabled:opacity-40 disabled:pointer-events-none cursor-pointer active:scale-95"
                             title={isPlaying ? "Pause" : "Play"}
                           >
                             {audioLoading ? (
-                              <RefreshCw className="h-5 w-5 animate-spin text-slate-950" />
+                              <RefreshCw className="h-5 w-5 animate-spin text-white" />
                             ) : isPlaying ? (
                               <Pause className="h-5 w-5 fill-current" />
                             ) : (
@@ -1120,7 +1357,7 @@ export default function Recordings() {
                           <button
                             onClick={() => handleSkip(10)}
                             disabled={selectedRec.status !== "READY"}
-                            className="p-2 rounded-lg bg-slate-900 hover:bg-slate-800 text-slate-300 hover:text-white transition-all disabled:opacity-40"
+                            className="p-2 rounded-xl bg-white hover:bg-slate-100 text-slate-700 border border-[#E4E7EC] shadow-xs transition-all disabled:opacity-40 cursor-pointer"
                             title="Forward 10 seconds"
                           >
                             <RotateCw className="h-4 w-4" />
@@ -1128,15 +1365,15 @@ export default function Recordings() {
                         </div>
 
                         {/* Speed Selector */}
-                        <div className="flex items-center space-x-1">
+                        <div className="flex items-center space-x-1 bg-white border border-[#E4E7EC] rounded-lg p-0.5">
                           {[0.75, 1, 1.25, 1.5, 2].map((rate) => (
                             <button
                               key={rate}
                               onClick={() => handleRateChange(rate)}
-                              className={`px-2 py-0.5 rounded text-[10px] font-bold transition-all ${
+                              className={`px-2 py-0.5 rounded text-[10px] font-bold transition-all cursor-pointer ${
                                 playbackRate === rate
-                                  ? "bg-amber-500 text-slate-950"
-                                  : "bg-slate-800 text-slate-400 hover:text-white"
+                                  ? "bg-blue-600 text-white shadow-xs"
+                                  : "text-slate-600 hover:text-slate-900"
                               }`}
                             >
                               {rate}x
@@ -1148,12 +1385,12 @@ export default function Recordings() {
                         <div className="flex items-center space-x-1.5 w-28">
                           <button
                             onClick={toggleMute}
-                            className="text-slate-400 hover:text-white p-1"
+                            className="text-slate-500 hover:text-slate-800 p-1 cursor-pointer"
                           >
                             {isMuted || volume === 0 ? (
-                              <VolumeX className="h-4 w-4 text-red-400" />
+                              <VolumeX className="h-4 w-4 text-rose-500" />
                             ) : (
-                              <Volume2 className="h-4 w-4 text-slate-300" />
+                              <Volume2 className="h-4 w-4 text-slate-700" />
                             )}
                           </button>
                           <input
@@ -1163,22 +1400,22 @@ export default function Recordings() {
                             step={0.05}
                             value={isMuted ? 0 : volume}
                             onChange={handleVolumeChange}
-                            className="w-16 h-1.5 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-amber-500"
+                            className="w-16 h-1.5 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-blue-600"
                           />
                         </div>
                       </div>
 
-                      {/* Error Banner */}
+                      {/* Error State Banner */}
                       {audioError && (
-                        <div className="p-2.5 rounded-lg bg-red-950/40 border border-red-800/40 text-red-300 text-xs flex items-center justify-between">
-                          <span className="flex items-center gap-1.5">
-                            <AlertCircle className="h-4 w-4 text-red-400 shrink-0" />
+                        <div className="p-3 rounded-xl bg-rose-50 border border-rose-200 text-rose-700 text-xs flex items-center justify-between">
+                          <span className="flex items-center gap-1.5 font-medium">
+                            <AlertCircle className="h-4 w-4 text-rose-600 shrink-0" />
                             {audioError}
                           </span>
                           {isSupervisor && (
                             <button
                               onClick={() => handleRetry(selectedRec)}
-                              className="px-2 py-0.5 rounded bg-red-800 hover:bg-red-700 text-white font-semibold text-[10px]"
+                              className="px-2.5 py-1 rounded-lg bg-rose-600 hover:bg-rose-700 text-white font-bold text-[10px] shadow-xs cursor-pointer"
                             >
                               Retry
                             </button>
@@ -1187,67 +1424,68 @@ export default function Recordings() {
                       )}
                     </div>
 
-                    {/* Quick Call Overview Summary */}
-                    <div className="p-3.5 rounded-xl bg-slate-950/60 border border-slate-800 space-y-2.5 text-xs">
-                      <div className="font-semibold text-slate-200 flex items-center justify-between">
+                    {/* Quick Call Overview Summary Card */}
+                    <div className="p-4 rounded-xl bg-white border border-[#E4E7EC] space-y-3 text-xs shadow-xs">
+                      <div className="font-bold text-[#111827] flex items-center justify-between border-b border-slate-100 pb-2.5">
                         <span>Recording Status & Compliance</span>
-                        <span className="text-[11px] text-emerald-400 flex items-center gap-1">
-                          <ShieldCheck className="h-3.5 w-3.5" />
+                        <span className="text-[11px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded-full flex items-center gap-1">
+                          <ShieldCheck className="h-3.5 w-3.5 text-emerald-600" />
                           Consent Recorded
                         </span>
                       </div>
 
-                      <div className="grid grid-cols-2 gap-2 text-slate-400">
-                        <div>
-                          <span className="text-slate-500">Call Outcome: </span>
-                          <span className="text-slate-200 font-medium capitalize">{selectedRec.call_outcome || "Completed"}</span>
+                      <div className="grid grid-cols-2 gap-3 text-[#667085]">
+                        <div className="bg-slate-50 p-2.5 rounded-lg border border-slate-100">
+                          <span className="text-[11px] block font-medium">Call Outcome:</span>
+                          <span className="text-[#111827] font-bold capitalize mt-0.5 block">{selectedRec.call_outcome || "Completed"}</span>
                         </div>
-                        <div>
-                          <span className="text-slate-500">File Size: </span>
-                          <span className="text-slate-200 font-medium">{formatFileSize(selectedRec.file_size_bytes || selectedRec.bytes)}</span>
+                        <div className="bg-slate-50 p-2.5 rounded-lg border border-slate-100">
+                          <span className="text-[11px] block font-medium">File Size:</span>
+                          <span className="text-[#111827] font-bold mt-0.5 block">{formatFileSize(selectedRec.file_size_bytes || selectedRec.bytes)}</span>
                         </div>
-                        <div>
-                          <span className="text-slate-500">Format: </span>
-                          <span className="text-slate-200 font-medium uppercase font-mono">{selectedRec.format || selectedRec.mime_type || "WAV"}</span>
+                        <div className="bg-slate-50 p-2.5 rounded-lg border border-slate-100">
+                          <span className="text-[11px] block font-medium">Format:</span>
+                          <span className="text-[#111827] font-bold uppercase font-mono mt-0.5 block">{selectedRec.format || selectedRec.mime_type || "WEBM"}</span>
                         </div>
-                        <div>
-                          <span className="text-slate-500">Duration: </span>
-                          <span className="text-slate-200 font-medium">{formatSeconds(selectedRec.duration_seconds || selectedRec.duration || 0)}</span>
+                        <div className="bg-slate-50 p-2.5 rounded-lg border border-slate-100">
+                          <span className="text-[11px] block font-medium">Duration:</span>
+                          <span className="text-[#111827] font-bold mt-0.5 block">{formatSeconds(selectedRec.duration_seconds || selectedRec.duration || 0)}</span>
                         </div>
                       </div>
                     </div>
                   </div>
                 )}
 
+                {/* ── TAB 2: CLOUDINARY ASSET METADATA ───────────────────────── */}
                 {activeTab === "metadata" && (
                   <div className="space-y-3 text-xs">
                     {/* Cloudinary Asset Metadata Card */}
-                    <div className="p-3.5 rounded-xl bg-slate-950/80 border border-cyan-800/30 space-y-2.5">
-                      <div className="flex items-center justify-between">
-                        <h3 className="font-bold text-cyan-400 uppercase tracking-wider text-[10px] flex items-center gap-1.5">
-                          <Cloud className="h-3.5 w-3.5" />
+                    <div className="p-4 rounded-xl bg-white border border-[#E4E7EC] shadow-xs space-y-3">
+                      <div className="flex items-center justify-between border-b border-slate-100 pb-2.5">
+                        <h3 className="font-bold text-blue-700 uppercase tracking-wider text-[10px] flex items-center gap-1.5">
+                          <Cloud className="h-4 w-4 text-blue-600" />
                           Cloudinary Storage Reference
                         </h3>
-                        <span className="text-[10px] px-2 py-0.5 rounded font-medium bg-cyan-500/10 text-cyan-400 border border-cyan-500/20 flex items-center gap-1">
-                          <Lock className="h-2.5 w-2.5" />
+                        <span className="text-[10px] px-2 py-0.5 rounded-full font-bold bg-blue-50 text-blue-700 border border-blue-200 flex items-center gap-1">
+                          <Lock className="h-3 w-3 text-blue-600" />
                           Authenticated Delivery
                         </span>
                       </div>
 
-                      <div className="space-y-2 text-slate-300">
-                        <div className="flex items-center justify-between">
-                          <span className="text-slate-400">Storage Provider:</span>
-                          <span className="font-semibold text-cyan-300 uppercase font-mono">{selectedRec.storage_provider || "Cloudinary"}</span>
+                      <div className="space-y-2.5 text-slate-700">
+                        <div className="flex items-center justify-between py-1 border-b border-slate-100">
+                          <span className="text-[#667085] font-medium">Storage Provider:</span>
+                          <span className="font-bold text-blue-700 uppercase font-mono">{selectedRec.storage_provider || "Cloudinary"}</span>
                         </div>
 
-                        <div className="flex items-center justify-between">
-                          <span className="text-slate-400">Public ID:</span>
-                          <div className="flex items-center space-x-1 font-mono text-cyan-400 text-[11px] truncate max-w-[200px]">
+                        <div className="flex items-center justify-between py-1 border-b border-slate-100">
+                          <span className="text-[#667085] font-medium">Public ID:</span>
+                          <div className="flex items-center space-x-1.5 font-mono text-blue-700 text-[11px] truncate max-w-[200px]">
                             <span className="truncate">{selectedRec.public_id || "N/A"}</span>
                             {selectedRec.public_id && (
                               <button
                                 onClick={() => copyToClipboard(selectedRec.public_id || "", "Public ID")}
-                                className="p-1 hover:text-white shrink-0"
+                                className="p-1 hover:text-blue-900 shrink-0 cursor-pointer"
                                 title="Copy Cloudinary Public ID"
                               >
                                 <Copy className="h-3 w-3" />
@@ -1257,13 +1495,13 @@ export default function Recordings() {
                         </div>
 
                         {selectedRec.secure_url && (
-                          <div className="flex items-center justify-between">
-                            <span className="text-slate-400">Secure URL:</span>
-                            <div className="flex items-center space-x-1 font-mono text-slate-300 text-[11px] truncate max-w-[200px]">
+                          <div className="flex items-center justify-between py-1 border-b border-slate-100">
+                            <span className="text-[#667085] font-medium">Secure URL:</span>
+                            <div className="flex items-center space-x-1.5 font-mono text-slate-800 text-[11px] truncate max-w-[200px]">
                               <span className="truncate">{selectedRec.secure_url}</span>
                               <button
                                 onClick={() => copyToClipboard(selectedRec.secure_url || "", "Secure URL")}
-                                className="p-1 hover:text-white shrink-0"
+                                className="p-1 hover:text-blue-600 shrink-0 cursor-pointer"
                                 title="Copy Secure URL"
                               >
                                 <Copy className="h-3 w-3" />
@@ -1272,29 +1510,29 @@ export default function Recordings() {
                           </div>
                         )}
 
-                        <div className="flex items-center justify-between">
-                          <span className="text-slate-400">Resource Type:</span>
-                          <span className="font-mono text-slate-300">video (audio stream)</span>
+                        <div className="flex items-center justify-between py-1 border-b border-slate-100">
+                          <span className="text-[#667085] font-medium">Resource Type:</span>
+                          <span className="font-mono text-slate-900 font-semibold">video (audio stream)</span>
                         </div>
 
-                        <div className="flex items-center justify-between">
-                          <span className="text-slate-400">Format:</span>
-                          <span className="font-mono text-slate-300 uppercase">{selectedRec.format || "wav"}</span>
+                        <div className="flex items-center justify-between py-1">
+                          <span className="text-[#667085] font-medium">Format:</span>
+                          <span className="font-mono text-slate-900 font-bold uppercase">{selectedRec.format || "webm"}</span>
                         </div>
                       </div>
                     </div>
 
                     {/* Identifiers Card */}
-                    <div className="p-3.5 rounded-xl bg-slate-950/60 border border-slate-800 space-y-2">
-                      <h3 className="font-bold text-slate-200 uppercase tracking-wider text-[10px]">Call Identifiers</h3>
-                      <div className="space-y-1.5">
+                    <div className="p-4 rounded-xl bg-white border border-[#E4E7EC] shadow-xs space-y-2.5">
+                      <h3 className="font-bold text-[#111827] uppercase tracking-wider text-[10px] border-b border-slate-100 pb-2">Call Identifiers</h3>
+                      <div className="space-y-2 text-slate-700">
                         <div className="flex items-center justify-between">
-                          <span className="text-slate-400">Call ID:</span>
-                          <div className="flex items-center space-x-1 font-mono text-slate-200">
+                          <span className="text-[#667085] font-medium">Call ID:</span>
+                          <div className="flex items-center space-x-1.5 font-mono text-slate-900 font-bold">
                             <span>{selectedRec.call_id}</span>
                             <button
                               onClick={() => copyToClipboard(selectedRec.call_id, "Call ID")}
-                              className="p-1 hover:text-amber-400"
+                              className="p-1 hover:text-blue-600 cursor-pointer"
                             >
                               <Copy className="h-3 w-3" />
                             </button>
@@ -1303,12 +1541,12 @@ export default function Recordings() {
 
                         {selectedRec.lead_id && (
                           <div className="flex items-center justify-between">
-                            <span className="text-slate-400">Lead ID:</span>
-                            <div className="flex items-center space-x-1 font-mono text-slate-200">
+                            <span className="text-[#667085] font-medium">Lead ID:</span>
+                            <div className="flex items-center space-x-1.5 font-mono text-slate-900">
                               <span>{selectedRec.lead_id}</span>
                               <button
                                 onClick={() => copyToClipboard(selectedRec.lead_id || "", "Lead ID")}
-                                className="p-1 hover:text-amber-400"
+                                className="p-1 hover:text-blue-600 cursor-pointer"
                               >
                                 <Copy className="h-3 w-3" />
                               </button>
@@ -1317,138 +1555,121 @@ export default function Recordings() {
                         )}
 
                         <div className="flex items-center justify-between">
-                          <span className="text-slate-400">Customer Name:</span>
-                          <span className="font-semibold text-slate-200">{selectedRec.customer_name || "Customer"}</span>
+                          <span className="text-[#667085] font-medium">Customer Name:</span>
+                          <span className="font-bold text-slate-900">{selectedRec.customer_name || "Customer"}</span>
                         </div>
 
                         <div className="flex items-center justify-between">
-                          <span className="text-slate-400">Phone (Masked):</span>
-                          <span className="font-mono text-slate-200">{selectedRec.masked_phone || "****"}</span>
+                          <span className="text-[#667085] font-medium">Phone (Masked):</span>
+                          <span className="font-mono font-semibold text-slate-900">{selectedRec.masked_phone || "****"}</span>
                         </div>
                       </div>
                     </div>
 
                     {/* Upload Timestamps & Integrity */}
-                    <div className="p-3.5 rounded-xl bg-slate-950/60 border border-slate-800 space-y-2">
-                      <h3 className="font-bold text-slate-200 uppercase tracking-wider text-[10px]">Timestamps & Integrity</h3>
-                      <div className="space-y-1.5">
+                    <div className="p-4 rounded-xl bg-white border border-[#E4E7EC] shadow-xs space-y-2.5">
+                      <h3 className="font-bold text-[#111827] uppercase tracking-wider text-[10px] border-b border-slate-100 pb-2">Timestamps & Integrity</h3>
+                      <div className="space-y-2 text-slate-700">
                         <div className="flex items-center justify-between">
-                          <span className="text-slate-400">Upload Started:</span>
-                          <span className="font-mono text-slate-300">
+                          <span className="text-[#667085] font-medium">Upload Started:</span>
+                          <span className="font-mono text-slate-800">
                             {selectedRec.upload_started_at ? new Date(selectedRec.upload_started_at).toLocaleTimeString() : "N/A"}
                           </span>
                         </div>
                         <div className="flex items-center justify-between">
-                          <span className="text-slate-400">Upload Completed:</span>
-                          <span className="font-mono text-slate-300">
+                          <span className="text-[#667085] font-medium">Upload Completed:</span>
+                          <span className="font-mono text-slate-800">
                             {selectedRec.upload_completed_at ? new Date(selectedRec.upload_completed_at).toLocaleTimeString() : "N/A"}
                           </span>
                         </div>
                         {selectedRec.upload_error_at && (
-                          <div className="flex items-center justify-between text-rose-400">
-                            <span>Error Timestamp:</span>
+                          <div className="flex items-center justify-between text-rose-700">
+                            <span className="font-medium">Error Timestamp:</span>
                             <span className="font-mono">{new Date(selectedRec.upload_error_at).toLocaleTimeString()}</span>
                           </div>
                         )}
                         {selectedRec.checksum_sha256 && (
-                          <div className="flex flex-col space-y-1 pt-1 border-t border-slate-800">
-                            <span className="text-slate-400">SHA-256 Checksum:</span>
-                            <span className="font-mono text-[10px] text-amber-400 break-all bg-slate-900 p-1.5 rounded">
+                          <div className="flex flex-col space-y-1 pt-1.5 border-t border-slate-100">
+                            <span className="text-[#667085] font-medium">SHA-256 Checksum:</span>
+                            <span className="font-mono text-[10px] text-slate-800 break-all bg-slate-50 p-2 rounded-lg border border-slate-200">
                               {selectedRec.checksum_sha256}
                             </span>
                           </div>
                         )}
                       </div>
                     </div>
-
-                    {/* Agent & Lifecycle Timing */}
-                    <div className="p-3.5 rounded-xl bg-slate-950/60 border border-slate-800 space-y-2">
-                      <h3 className="font-bold text-slate-200 uppercase tracking-wider text-[10px]">Agent & Lifecycle Timing</h3>
-                      <div className="grid grid-cols-2 gap-2">
-                        <div>
-                          <span className="text-slate-500">Agent: </span>
-                          <span className="text-slate-200 font-medium">{selectedRec.agent_name}</span>
-                        </div>
-                        <div>
-                          <span className="text-slate-500">Pool: </span>
-                          <span className="text-slate-200 font-medium capitalize">{selectedRec.pool_id || "General"}</span>
-                        </div>
-                        <div>
-                          <span className="text-slate-500">Started: </span>
-                          <span className="text-slate-200 font-medium">{selectedRec.call_start_time ? new Date(selectedRec.call_start_time).toLocaleTimeString() : "N/A"}</span>
-                        </div>
-                        <div>
-                          <span className="text-slate-500">Ended: </span>
-                          <span className="text-slate-200 font-medium">{selectedRec.call_end_time ? new Date(selectedRec.call_end_time).toLocaleTimeString() : "N/A"}</span>
-                        </div>
-                      </div>
-                    </div>
                   </div>
                 )}
 
+                {/* ── TAB 3: AI TRANSCRIPT ────────────────────────────────────── */}
                 {activeTab === "transcript" && (
                   <div className="space-y-3 text-xs">
                     {/* AI Summary Block */}
-                    <div className="p-3.5 rounded-xl bg-gradient-to-br from-purple-950/40 to-slate-950 border border-purple-800/30 space-y-2">
-                      <div className="flex items-center space-x-1.5 text-purple-400 font-bold text-[11px] uppercase tracking-wider">
-                        <Sparkles className="h-3.5 w-3.5" />
+                    <div className="p-4 rounded-xl bg-purple-50/70 border border-purple-200 shadow-xs space-y-2">
+                      <div className="flex items-center space-x-1.5 text-purple-700 font-bold text-[11px] uppercase tracking-wider">
+                        <Sparkles className="h-4 w-4 text-purple-600" />
                         <span>AI Call Summary & Insights</span>
                       </div>
-                      <p className="text-slate-300 leading-relaxed">
-                        {selectedRec.ai_summary || "No AI summary available for this call."}
+                      <p className="text-purple-950 leading-relaxed font-medium">
+                        {selectedRec.ai_summary || "No AI summary generated for this call."}
                       </p>
                     </div>
 
                     {/* Agent Notes */}
                     {selectedRec.notes && (
-                      <div className="p-3 rounded-xl bg-slate-950/60 border border-slate-800 space-y-1">
-                        <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Agent Notes</span>
-                        <p className="text-slate-200">{selectedRec.notes}</p>
+                      <div className="p-3.5 rounded-xl bg-white border border-[#E4E7EC] shadow-xs space-y-1">
+                        <span className="text-[10px] font-bold text-[#667085] uppercase tracking-wider">Agent Remarks</span>
+                        <p className="text-slate-800 font-medium">{selectedRec.notes}</p>
                       </div>
                     )}
 
                     {/* Structured Transcript */}
-                    <div className="p-3.5 rounded-xl bg-slate-950/60 border border-slate-800 space-y-2">
-                      <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider flex items-center gap-1.5">
-                        <FileText className="h-3 w-3 text-slate-400" />
-                        Transcript
+                    <div className="p-4 rounded-xl bg-white border border-[#E4E7EC] shadow-xs space-y-2.5">
+                      <span className="text-[10px] font-bold text-[#667085] uppercase tracking-wider flex items-center gap-1.5 border-b border-slate-100 pb-2">
+                        <FileText className="h-3.5 w-3.5 text-slate-400" />
+                        Verbatim Transcript
                       </span>
                       {selectedRec.transcript ? (
-                        <div className="space-y-2 text-slate-300 leading-relaxed font-sans max-h-60 overflow-y-auto pr-1">
+                        <div className="space-y-2 text-slate-800 leading-relaxed font-sans max-h-60 overflow-y-auto pr-1">
                           {selectedRec.transcript.split("\n").map((line, idx) => (
-                            <p key={idx} className="bg-slate-900/50 p-2 rounded border border-slate-800/40">
+                            <p key={idx} className="bg-slate-50 p-2.5 rounded-lg border border-slate-200 text-xs">
                               {line}
                             </p>
                           ))}
                         </div>
                       ) : (
-                        <p className="text-slate-500 italic">No audio transcript recorded for this call.</p>
+                        <p className="text-[#667085] italic py-2">No verbatim transcript recorded for this conversation.</p>
                       )}
                     </div>
                   </div>
                 )}
 
+                {/* ── TAB 4: TIMELINE ─────────────────────────────────────────── */}
                 {activeTab === "events" && (
                   <div className="space-y-2 text-xs">
                     {selectedRec.events && selectedRec.events.length > 0 ? (
-                      <div className="relative pl-4 space-y-3 before:absolute before:left-1.5 before:top-2 before:bottom-2 before:w-0.5 before:bg-slate-800">
+                      <div className="relative pl-4 space-y-3.5 before:absolute before:left-1.5 before:top-2 before:bottom-2 before:w-0.5 before:bg-slate-200">
                         {selectedRec.events.map((evt: any, i: number) => (
-                          <div key={i} className="relative pl-2">
-                            <div className="absolute -left-[18px] top-1.5 h-2.5 w-2.5 rounded-full bg-amber-500 ring-4 ring-slate-900" />
-                            <div className="p-2 rounded-lg bg-slate-950/60 border border-slate-800">
+                          <div key={i} className="relative pl-2.5">
+                            <div className="absolute -left-[19px] top-1.5 h-2.5 w-2.5 rounded-full bg-blue-600 ring-4 ring-white shadow-xs" />
+                            <div className="p-3 rounded-xl bg-white border border-[#E4E7EC] shadow-xs">
                               <div className="flex items-center justify-between text-[11px]">
-                                <span className="font-semibold text-slate-200">{evt.title || evt.event || "Call Event"}</span>
-                                <span className="text-slate-500 font-mono">{evt.timestamp || evt.created_at?.slice(11, 19) || ""}</span>
+                                <span className="font-bold text-slate-900">{evt.title || evt.event || "Call Event"}</span>
+                                <span className="text-[#667085] font-mono text-[10px]">{evt.timestamp || evt.created_at?.slice(11, 19) || ""}</span>
                               </div>
                               {evt.description && (
-                                <p className="text-slate-400 text-[11px] mt-0.5">{evt.description}</p>
+                                <p className="text-[#667085] text-[11px] mt-1 font-medium">{evt.description}</p>
                               )}
                             </div>
                           </div>
                         ))}
                       </div>
                     ) : (
-                      <p className="text-slate-500 text-center py-6">No call event log captured for this call.</p>
+                      <div className="text-center py-8 text-[#667085]">
+                        <Clock className="h-8 w-8 mx-auto text-slate-300 mb-2" />
+                        <p className="font-semibold text-xs text-slate-700">No event log captured</p>
+                        <p className="text-[11px] text-[#667085] mt-0.5">Call events will appear here in chronological order.</p>
+                      </div>
                     )}
                   </div>
                 )}
@@ -1458,51 +1679,172 @@ export default function Recordings() {
         </div>
       </main>
 
-      {/* Orphan Cleanup Confirmation Modal */}
-      {showCleanupModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm animate-fadeIn">
-          <div className="w-full max-w-md rounded-2xl bg-slate-900 border border-slate-800 p-6 shadow-2xl space-y-4">
-            <div className="flex items-center space-x-3 text-red-400">
-              <div className="h-10 w-10 rounded-xl bg-red-500/20 flex items-center justify-center">
-                <Trash2 className="h-5 w-5" />
+      {/* ── Single Recording Deletion Confirmation Modal ─────────────────── */}
+      {recordingToDelete && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/40 backdrop-blur-xs animate-fadeIn">
+          <div className="w-full max-w-md rounded-2xl bg-white border border-[#E4E7EC] p-6 shadow-2xl space-y-4">
+            <div className="flex items-center space-x-3 text-rose-700">
+              <div className="h-10 w-10 rounded-xl bg-rose-50 border border-rose-100 flex items-center justify-center shrink-0">
+                <Trash2 className="h-5 w-5 text-rose-600" />
               </div>
               <div>
-                <h3 className="text-lg font-bold text-white">Scan & Cleanup Orphan Recordings</h3>
-                <p className="text-xs text-slate-400">Admin Maintenance Utility</p>
+                <h3 className="text-base font-bold text-[#111827]">Delete Call Recording?</h3>
+                <p className="text-xs text-[#667085]">Permanent Asset & Record Removal</p>
               </div>
             </div>
 
-            <p className="text-xs text-slate-300 leading-relaxed">
-              This routine scans physical storage and purges audio files that are no longer indexed in the MongoDB database, reclaiming storage space securely while retaining all valid call audio files.
+            <p className="text-xs text-slate-600 leading-relaxed font-medium">
+              Are you sure you want to delete this recording? This action will permanently remove the audio file from Cloudinary/storage and unlink it from the call log.
             </p>
 
-            {cleanupResult && (
-              <div className="p-3 rounded-xl bg-slate-950 border border-slate-800 text-xs space-y-1 text-slate-300">
-                <div className="text-emerald-400 font-semibold flex items-center gap-1.5">
-                  <CheckCircle2 className="h-4 w-4" />
-                  Cleanup Completed
-                </div>
-                <div>Deleted files count: <span className="text-white font-mono">{cleanupResult.orphans_cleaned_count}</span></div>
-                <div>Reclaimed space: <span className="text-white font-mono">{cleanupResult.reclaimed_mb} MB</span></div>
+            {/* Recording Summary Preview */}
+            <div className="p-3 rounded-xl bg-slate-50 border border-slate-200 text-xs space-y-1.5">
+              <div className="flex items-center justify-between">
+                <span className="text-[#667085]">Customer:</span>
+                <span className="font-bold text-slate-900">{recordingToDelete.customer_name || "Customer"}</span>
               </div>
-            )}
+              <div className="flex items-center justify-between">
+                <span className="text-[#667085]">Phone:</span>
+                <span className="font-mono text-slate-800">{recordingToDelete.masked_phone || "****"}</span>
+              </div>
+              <div className="flex items-center justify-between">
+                <span className="text-[#667085]">Call ID:</span>
+                <span className="font-mono text-[11px] text-slate-700 truncate max-w-[200px]">{recordingToDelete.call_id}</span>
+              </div>
+              <div className="flex items-center justify-between">
+                <span className="text-[#667085]">Duration:</span>
+                <span className="font-mono font-bold text-blue-700">{formatSeconds(recordingToDelete.duration_seconds || recordingToDelete.duration || 0)}</span>
+              </div>
+            </div>
 
-            <div className="flex items-center justify-end space-x-2 pt-2 border-t border-slate-800">
+            <div className="flex items-center justify-end space-x-2 pt-3 border-t border-[#E4E7EC]">
               <button
-                onClick={() => setShowCleanupModal(false)}
-                disabled={cleaningOrphans}
-                className="px-4 py-2 rounded-lg text-xs font-semibold bg-slate-800 hover:bg-slate-700 text-slate-300 transition-all"
+                onClick={() => setRecordingToDelete(null)}
+                disabled={isDeleting}
+                className="px-4 py-2 rounded-xl text-xs font-semibold bg-slate-100 hover:bg-slate-200 text-slate-700 transition-all cursor-pointer disabled:opacity-50"
               >
-                Close
+                Cancel
               </button>
 
               <button
-                onClick={handleCleanupOrphans}
-                disabled={cleaningOrphans}
-                className="px-4 py-2 rounded-lg text-xs font-semibold bg-red-600 hover:bg-red-500 text-white shadow-lg shadow-red-600/30 transition-all flex items-center gap-1.5 disabled:opacity-50"
+                onClick={confirmDeleteSingle}
+                disabled={isDeleting}
+                className="px-4 py-2 rounded-xl text-xs font-bold bg-rose-600 hover:bg-rose-700 text-white shadow-sm shadow-rose-600/30 transition-all flex items-center gap-1.5 disabled:opacity-50 cursor-pointer"
               >
-                {cleaningOrphans && <RefreshCw className="h-3.5 w-3.5 animate-spin" />}
-                <span>{cleaningOrphans ? "Cleaning..." : "Run Cleanup Now"}</span>
+                {isDeleting && <RefreshCw className="h-3.5 w-3.5 animate-spin" />}
+                <span>{isDeleting ? "Deleting..." : "Yes, Delete Recording"}</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Batch Recordings Deletion Confirmation Modal ───────────────────── */}
+      {showBatchDeleteModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/40 backdrop-blur-xs animate-fadeIn">
+          <div className="w-full max-w-md rounded-2xl bg-white border border-[#E4E7EC] p-6 shadow-2xl space-y-4">
+            <div className="flex items-center space-x-3 text-rose-700">
+              <div className="h-10 w-10 rounded-xl bg-rose-50 border border-rose-100 flex items-center justify-center shrink-0">
+                <Trash2 className="h-5 w-5 text-rose-600" />
+              </div>
+              <div>
+                <h3 className="text-base font-bold text-[#111827]">Delete {selectedIds.size} Selected Recordings?</h3>
+                <p className="text-xs text-[#667085]">Bulk Asset & Database Cleanup</p>
+              </div>
+            </div>
+
+            <p className="text-xs text-slate-600 leading-relaxed font-medium">
+              You are about to permanently delete <strong className="text-slate-900 font-bold">{selectedIds.size}</strong> call recordings. All corresponding Cloudinary media files and database records will be erased.
+            </p>
+
+            <div className="flex items-center justify-end space-x-2 pt-3 border-t border-[#E4E7EC]">
+              <button
+                onClick={() => setShowBatchDeleteModal(false)}
+                disabled={isDeleting}
+                className="px-4 py-2 rounded-xl text-xs font-semibold bg-slate-100 hover:bg-slate-200 text-slate-700 transition-all cursor-pointer disabled:opacity-50"
+              >
+                Cancel
+              </button>
+
+              <button
+                onClick={confirmBatchDelete}
+                disabled={isDeleting}
+                className="px-4 py-2 rounded-xl text-xs font-bold bg-rose-600 hover:bg-rose-700 text-white shadow-sm shadow-rose-600/30 transition-all flex items-center gap-1.5 disabled:opacity-50 cursor-pointer"
+              >
+                {isDeleting && <RefreshCw className="h-3.5 w-3.5 animate-spin" />}
+                <span>{isDeleting ? "Deleting..." : `Delete ${selectedIds.size} Recordings`}</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Storage Maintenance & Orphan Cleanup Modal ──────────────────────── */}
+      {showCleanupModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/40 backdrop-blur-xs animate-fadeIn">
+          <div className="w-full max-w-md rounded-2xl bg-white border border-[#E4E7EC] p-6 shadow-2xl space-y-4">
+            <div className="flex items-center space-x-3 text-rose-700">
+              <div className="h-10 w-10 rounded-xl bg-rose-50 border border-rose-100 flex items-center justify-center">
+                <Trash2 className="h-5 w-5 text-rose-600" />
+              </div>
+              <div>
+                <h3 className="text-base font-bold text-[#111827]">Storage & Maintenance Utilities</h3>
+                <p className="text-xs text-[#667085]">Admin Maintenance Tools</p>
+              </div>
+            </div>
+
+            <p className="text-xs text-slate-600 leading-relaxed font-medium">
+              Choose an administrative storage cleanup tool below:
+            </p>
+
+            <div className="space-y-2">
+              <div className="p-3 rounded-xl border border-slate-200 bg-slate-50 flex items-center justify-between">
+                <div>
+                  <h4 className="text-xs font-bold text-slate-900">Scan & Clean Orphan Files</h4>
+                  <p className="text-[11px] text-[#667085]">Purges physical files with no database index.</p>
+                </div>
+                <button
+                  onClick={handleCleanupOrphans}
+                  disabled={cleaningOrphans}
+                  className="px-3 py-1.5 rounded-lg text-xs font-bold bg-slate-800 hover:bg-slate-900 text-white shadow-xs transition-all cursor-pointer disabled:opacity-50 shrink-0"
+                >
+                  {cleaningOrphans ? "Cleaning..." : "Run Cleanup"}
+                </button>
+              </div>
+
+              <div className="p-3 rounded-xl border border-rose-200 bg-rose-50/50 flex items-center justify-between">
+                <div>
+                  <h4 className="text-xs font-bold text-rose-900">Purge Failed Recordings</h4>
+                  <p className="text-[11px] text-rose-700">Removes records that failed processing.</p>
+                </div>
+                <button
+                  onClick={handlePurgeFailed}
+                  disabled={cleaningOrphans}
+                  className="px-3 py-1.5 rounded-lg text-xs font-bold bg-rose-600 hover:bg-rose-700 text-white shadow-xs transition-all cursor-pointer disabled:opacity-50 shrink-0"
+                >
+                  Purge Failed
+                </button>
+              </div>
+            </div>
+
+            {cleanupResult && (
+              <div className="p-3.5 rounded-xl bg-emerald-50 border border-emerald-200 text-xs space-y-1 text-emerald-900">
+                <div className="text-emerald-700 font-bold flex items-center gap-1.5">
+                  <CheckCircle2 className="h-4 w-4 text-emerald-600" />
+                  Cleanup Completed
+                </div>
+                <div>Deleted files count: <span className="font-mono font-bold text-slate-900">{cleanupResult.orphans_cleaned_count}</span></div>
+                <div>Reclaimed space: <span className="font-mono font-bold text-slate-900">{cleanupResult.reclaimed_mb} MB</span></div>
+              </div>
+            )}
+
+            <div className="flex items-center justify-end space-x-2 pt-3 border-t border-[#E4E7EC]">
+              <button
+                onClick={() => setShowCleanupModal(false)}
+                disabled={cleaningOrphans}
+                className="px-4 py-2 rounded-xl text-xs font-semibold bg-slate-100 hover:bg-slate-200 text-slate-700 transition-all cursor-pointer"
+              >
+                Close
               </button>
             </div>
           </div>

@@ -613,6 +613,192 @@ async def cleanup_orphan_recordings(user: dict = Depends(get_current_user)):
     }
 
 
+class BatchDeleteRequest(BaseModel):
+    recording_ids: List[str]
+
+
+# ─── 3b. DELETE SINGLE RECORDING ──────────────────────────────────────────────
+@router.delete("/{recording_id}", dependencies=[Depends(require_roles(Role.ADMIN, Role.TEAM_LEADER, Role.AGENT))])
+@router.delete("/{recording_id}/", dependencies=[Depends(require_roles(Role.ADMIN, Role.TEAM_LEADER, Role.AGENT))])
+@router.post("/{recording_id}/delete", dependencies=[Depends(require_roles(Role.ADMIN, Role.TEAM_LEADER, Role.AGENT))])
+@router.post("/{recording_id}/delete/", dependencies=[Depends(require_roles(Role.ADMIN, Role.TEAM_LEADER, Role.AGENT))])
+async def delete_recording(recording_id: str, user: dict = Depends(get_current_user)):
+    """
+    Permanently delete a call recording:
+    - Removes record from MongoDB recordings collection.
+    - Clears recording references from calls collection.
+    - Removes physical audio file from local disk.
+    - Destroys asset in Cloudinary if uploaded.
+    - Emits WebSocket event recording.deleted.
+    - Adds audit log entry.
+    """
+    query = {"_id": ObjectId(recording_id)} if ObjectId.is_valid(recording_id) else {"id": recording_id}
+    rec = await recordings_col.find_one(query)
+    if not rec:
+        rec = await recordings_col.find_one({"call_id": recording_id})
+
+    if not rec:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Recording not found")
+
+    if not await check_recording_access(user, rec):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied to delete this recording")
+
+    rec_oid = rec["_id"]
+    rec_id_str = str(rec_oid)
+    call_id = rec.get("call_id")
+    public_id = rec.get("public_id")
+    filename = rec.get("filename")
+    storage_path = rec.get("storage_path")
+
+    # 1. Delete physical local file
+    if filename:
+        storage_service.delete_recording_file(filename)
+    if storage_path and os.path.exists(storage_path):
+        try:
+            os.remove(storage_path)
+        except Exception as e:
+            logger.warning(f"[DELETE RECORDING] Error deleting path {storage_path}: {e}")
+
+    # 2. Delete Cloudinary asset
+    if public_id:
+        storage_service.delete_cloudinary_asset(public_id, type_access=rec.get("type", "upload"))
+
+    # 3. Delete from recordings collection
+    await recordings_col.delete_one({"_id": rec_oid})
+
+    # 4. Clear references in calls collection
+    if call_id:
+        await calls_col.update_many(
+            {"$or": [
+                {"_id": ObjectId(call_id)} if ObjectId.is_valid(call_id) else {"id": str(call_id)},
+                {"recording_id": rec_id_str},
+                {"recording_id": str(call_id)}
+            ]},
+            {"$set": {
+                "recording_id": None,
+                "recording_status": None,
+                "recording_file": None,
+                "recording_url": None,
+                "secure_url": None,
+                "public_id": None,
+                "updated_at": utcnow().isoformat()
+            }}
+        )
+
+    # 5. Audit log
+    uid = str(user.get("id") or user.get("_id"))
+    await audit_logs_col.insert_one({
+        "action": "delete_call_recording",
+        "user_id": uid,
+        "recording_id": rec_id_str,
+        "call_id": call_id,
+        "public_id": public_id,
+        "timestamp": utcnow()
+    })
+
+    # 6. WebSocket event
+    ws_event = {
+        "event": "recording.deleted",
+        "type": "recording_deleted",
+        "recording_id": rec_id_str,
+        "call_id": str(call_id) if call_id else None
+    }
+    await ws_manager.broadcast_global(ws_event)
+
+    return {
+        "status": "success",
+        "message": "Recording deleted successfully",
+        "recording_id": rec_id_str,
+        "call_id": str(call_id) if call_id else None
+    }
+
+
+# ─── 3c. BATCH DELETE RECORDINGS ──────────────────────────────────────────────
+@router.post("/batch-delete", dependencies=[Depends(require_roles(Role.ADMIN, Role.TEAM_LEADER))])
+@router.post("/batch-delete/", dependencies=[Depends(require_roles(Role.ADMIN, Role.TEAM_LEADER))])
+async def batch_delete_recordings(payload: BatchDeleteRequest, user: dict = Depends(get_current_user)):
+    """
+    Delete multiple call recordings by ID.
+    """
+    deleted_count = 0
+    errors = []
+
+    for r_id in payload.recording_ids:
+        try:
+            query = {"_id": ObjectId(r_id)} if ObjectId.is_valid(r_id) else {"id": r_id}
+            rec = await recordings_col.find_one(query)
+            if not rec:
+                rec = await recordings_col.find_one({"call_id": r_id})
+            if not rec:
+                continue
+
+            if not await check_recording_access(user, rec):
+                continue
+
+            rec_oid = rec["_id"]
+            rec_id_str = str(rec_oid)
+            call_id = rec.get("call_id")
+            public_id = rec.get("public_id")
+            filename = rec.get("filename")
+            storage_path = rec.get("storage_path")
+
+            if filename:
+                storage_service.delete_recording_file(filename)
+            if storage_path and os.path.exists(storage_path):
+                try:
+                    os.remove(storage_path)
+                except Exception:
+                    pass
+
+            if public_id:
+                storage_service.delete_cloudinary_asset(public_id, type_access=rec.get("type", "upload"))
+
+            await recordings_col.delete_one({"_id": rec_oid})
+
+            if call_id:
+                await calls_col.update_many(
+                    {"$or": [
+                        {"_id": ObjectId(call_id)} if ObjectId.is_valid(call_id) else {"id": str(call_id)},
+                        {"recording_id": rec_id_str}
+                    ]},
+                    {"$set": {
+                        "recording_id": None,
+                        "recording_status": None,
+                        "recording_file": None,
+                        "recording_url": None,
+                        "secure_url": None,
+                        "public_id": None,
+                        "updated_at": utcnow().isoformat()
+                    }}
+                )
+
+            ws_event = {
+                "event": "recording.deleted",
+                "type": "recording_deleted",
+                "recording_id": rec_id_str,
+                "call_id": str(call_id) if call_id else None
+            }
+            await ws_manager.broadcast_global(ws_event)
+            deleted_count += 1
+        except Exception as e:
+            errors.append(f"Failed to delete {r_id}: {str(e)}")
+
+    uid = str(user.get("id") or user.get("_id"))
+    await audit_logs_col.insert_one({
+        "action": "batch_delete_recordings",
+        "user_id": uid,
+        "deleted_count": deleted_count,
+        "requested_count": len(payload.recording_ids),
+        "timestamp": utcnow()
+    })
+
+    return {
+        "status": "success",
+        "deleted_count": deleted_count,
+        "errors": errors
+    }
+
+
 # ─── 4. GET RECORDING DETAILS ────────────────────────────────────────────────
 @router.get("/{recording_id}", dependencies=[Depends(require_roles(Role.ADMIN, Role.TEAM_LEADER, Role.AGENT))])
 async def get_recording_details(recording_id: str, user: dict = Depends(get_current_user)):
