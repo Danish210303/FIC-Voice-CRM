@@ -1061,6 +1061,18 @@ async def list_calls(
             if u.get("employee_id"):
                 user_map[u["employee_id"]] = u
 
+    # 3. Batch resolve recordings from recordings_col
+    call_ids_list = [str(c["_id"]) for c in calls_raw]
+    rec_map = {}
+    if call_ids_list:
+        c_oids = [ObjectId(cid) for cid in call_ids_list if ObjectId.is_valid(cid)]
+        found_recs = await recordings_col.find(
+            {"$or": [{"call_id": {"$in": call_ids_list}}, {"call_id": {"$in": c_oids}}]},
+            {"call_id": 1, "secure_url": 1, "recording_url": 1, "public_id": 1, "duration": 1, "duration_seconds": 1, "filename": 1, "status": 1}
+        ).to_list(length=1000)
+        for rc in found_recs:
+            rec_map[str(rc.get("call_id"))] = rc
+
     calls = []
     for c in calls_raw:
         # Lead attribution
@@ -1084,6 +1096,21 @@ async def list_calls(
                 c["agent_name"] = "Sales Agent" if aid else "Unassigned"
             if not c.get("agent_employee_id") and aid:
                 c["agent_employee_id"] = aid
+
+        # Recording enrichment from recordings_col
+        cid_str = str(c.get("_id") or c.get("id"))
+        rc_doc = rec_map.get(cid_str)
+        if rc_doc:
+            if not c.get("secure_url"):
+                c["secure_url"] = rc_doc.get("secure_url") or rc_doc.get("recording_url")
+            if not c.get("recording_url"):
+                c["recording_url"] = rc_doc.get("recording_url") or rc_doc.get("secure_url")
+            if not c.get("public_id"):
+                c["public_id"] = rc_doc.get("public_id")
+            if not c.get("recording_status"):
+                c["recording_status"] = "saved" if rc_doc.get("status") == "READY" else str(rc_doc.get("status", "")).lower()
+            if not c.get("duration_seconds") and rc_doc.get("duration_seconds"):
+                c["duration_seconds"] = int(rc_doc["duration_seconds"])
 
         calls.append(oid_str(c))
     return calls

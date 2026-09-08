@@ -305,27 +305,27 @@ export const PresenceProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       try {
         const start = new Date(loginStr).getTime();
         return Math.max(0, Math.floor((nowTicker - start) / 1000));
-      } catch {}
+      } catch { }
     }
     return (myPresence?.gross_seconds || 0) + (myStatus !== "offline" ? elapsedSinceStateChange : 0);
   }, [isCheckedInToday, myPresence?.login_at, myPresence?.gross_seconds, myStatus, elapsedSinceStateChange, nowTicker]);
-  
+
   // 2. Break Time (Live while paused)
   const activeBreakSeconds = (isCheckedInToday && myStatus === "paused") ? elapsedSinceStateChange : 0;
   const totalBreakSeconds = isCheckedInToday ? ((myPresence?.paused_seconds ?? myPresence?.total_break_seconds ?? myPresence?.total_pause_seconds ?? 0) + activeBreakSeconds) : 0;
-  
+
   // 3. Ready / Available Time (Live while ready)
   const activeReadySeconds = (isCheckedInToday && myStatus === "ready" && !(myPresence as any)?.currentCallId) ? elapsedSinceStateChange : 0;
   const readySeconds = isCheckedInToday ? ((myPresence?.ready_seconds ?? myPresence?.total_ready_seconds ?? 0) + activeReadySeconds) : 0;
-  
+
   // 4. Talk Time (Live while in_call)
   const activeTalkSeconds = (isCheckedInToday && myStatus === "in_call") ? elapsedSinceStateChange : 0;
   const talkSeconds = isCheckedInToday ? ((myPresence?.talk_seconds ?? myPresence?.total_talk_seconds ?? 0) + activeTalkSeconds) : 0;
-  
+
   // 5. Ringing Time (Live while ringing)
   const activeRingingSeconds = (isCheckedInToday && myStatus === "ringing") ? elapsedSinceStateChange : 0;
   const ringingSeconds = isCheckedInToday ? ((myPresence?.ringing_seconds ?? myPresence?.total_ringing_seconds ?? 0) + activeRingingSeconds) : 0;
-  
+
   // 6. Wrap-Up / Dispose Time (Live while wrap_up)
   const activeDisposeSeconds = (isCheckedInToday && myStatus === "wrap_up") ? elapsedSinceStateChange : 0;
   const disposeSeconds = isCheckedInToday ? ((myPresence?.dispose_seconds ?? myPresence?.total_wrapup_seconds ?? 0) + activeDisposeSeconds) : 0;
@@ -566,7 +566,7 @@ export const PresenceProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       ) {
         const data = payload.data || payload.presence || payload;
         const targetId = payload.agentId || payload.user_id || payload.agent_id || data.agentId || data.user_id || data.id;
-        
+
         if (targetId) {
           const rawStatus = payload.status || data.status || data.raw_status || data.currentState || "offline";
           const normalizedStatus = (rawStatus.toLowerCase().trim()) as "ready" | "paused" | "in_call" | "offline" | "checked_in" | "ringing" | "wrap_up";
@@ -696,7 +696,7 @@ export const PresenceProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
       ws.onopen = () => {
         if (isClosedByCleanup || isUnmountedRef.current) {
-          try { ws.close(); } catch {}
+          try { ws.close(); } catch { }
           return;
         }
         setWsConnected(true);
@@ -807,10 +807,10 @@ export const PresenceProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         s.onclose = null;
         s.onerror = null;
         if (s.readyState === WebSocket.OPEN) {
-          try { s.close(1000, "Component unmounted"); } catch {}
+          try { s.close(1000, "Component unmounted"); } catch { }
         } else if (s.readyState === WebSocket.CONNECTING) {
           s.onopen = () => {
-            try { s.close(1000, "Component unmounted"); } catch {}
+            try { s.close(1000, "Component unmounted"); } catch { }
           };
         }
         socketRef.current = null;
@@ -878,13 +878,13 @@ export const PresenceProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       const primaryEndpoint = newStatus === "ready"
         ? (prevStatus === "paused" ? "/api/agent/session/resume" : "/api/agent/session/start")
         : newStatus === "paused" ? "/api/agent/session/break"
-        : newStatus === "offline" ? "/api/agent/session/logout"
-        : "/api/presence/status";
+          : newStatus === "offline" ? "/api/agent/session/logout"
+            : "/api/presence/status";
 
       const fallbackEndpoint = newStatus === "ready" ? "/api/agent/presence/ready"
         : newStatus === "paused" ? "/api/agent/presence/pause"
-        : newStatus === "offline" ? "/api/agent/presence/offline"
-        : "/api/presence/status";
+          : newStatus === "offline" ? "/api/agent/presence/offline"
+            : "/api/presence/status";
 
       console.log("[SESSION API] Sending outbound status change to:", primaryEndpoint, {
         status: newStatus,

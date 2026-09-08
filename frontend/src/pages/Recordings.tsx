@@ -231,11 +231,23 @@ export default function Recordings() {
         setTotalCount(res.total || 0);
         setTotalPages(res.pages || 1);
 
-        // If currently selected recording was updated, sync it
-        if (selectedRec) {
-          const updated = res.items.find((r: RecordingItem) => (r.id || r._id) === (selectedRec.id || selectedRec._id) || r.call_id === selectedRec.call_id);
-          if (updated) {
-            setSelectedRec(updated);
+        // Auto-select recording on refresh, URL param, or initial load
+        if (res.items.length > 0) {
+          if (!selectedRec) {
+            const urlParams = new URLSearchParams(window.location.search);
+            const targetCallId = urlParams.get("call_id");
+            const targetRecId = urlParams.get("id") || urlParams.get("recording_id");
+            const matched = res.items.find(
+              (r: RecordingItem) =>
+                (targetCallId && r.call_id === targetCallId) ||
+                (targetRecId && ((r.id && r.id === targetRecId) || (r._id && r._id === targetRecId)))
+            );
+            handleSelectRecording(matched || res.items[0]);
+          } else {
+            const updated = res.items.find((r: RecordingItem) => (r.id || r._id) === (selectedRec.id || selectedRec._id) || r.call_id === selectedRec.call_id);
+            if (updated) {
+              setSelectedRec((prev) => (prev ? { ...prev, ...updated } : updated));
+            }
           }
         }
       }

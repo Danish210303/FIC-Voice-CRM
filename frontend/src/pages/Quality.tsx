@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import { api, getBaseUrl, getToken } from "../api/client";
 import { useToast } from "../context/ToastContext";
 import { CustomSelect } from "../components/CustomSelect";
@@ -6,6 +6,7 @@ import {
   ShieldCheck,
   CheckSquare,
   Volume2,
+  VolumeX,
   BookOpen,
   User,
   Calendar,
@@ -16,7 +17,12 @@ import {
   ChevronRight,
   Clock,
   Play,
-  Pause
+  Pause,
+  RotateCcw,
+  RotateCw,
+  Mic,
+  RefreshCw,
+  AlertCircle
 } from "lucide-react";
 
 type CallLog = {
@@ -80,6 +86,23 @@ const getRecordingAudioUrl = (call: CallLog | null): string | null => {
   return null;
 };
 
+const WAVEFORM_BARS = [
+  30, 55, 40, 75, 60, 90, 45, 80, 95, 65, 85, 50, 70, 90, 100, 80, 65, 45, 75,
+  90, 85, 60, 40, 70, 95, 80, 65, 90, 100, 75, 55, 40, 65, 80, 50, 30
+];
+
+const formatSeconds = (sec: number | string | undefined | null): string => {
+  const s = Math.max(0, Math.floor(Number(sec) || 0));
+  const mins = Math.floor(s / 60);
+  const rem = s % 60;
+  if (mins >= 60) {
+    const hrs = Math.floor(mins / 60);
+    const remMins = mins % 60;
+    return `${hrs.toString().padStart(2, "0")}:${remMins.toString().padStart(2, "0")}:${rem.toString().padStart(2, "0")}`;
+  }
+  return `${mins.toString().padStart(2, "0")}:${rem.toString().padStart(2, "0")}`;
+};
+
 const SENTIMENT_OPTIONS = [
   { value: "positive", label: "Positive (Satisfied, cooperative)" },
   { value: "neutral", label: "Neutral (General business exchange)" },
@@ -92,6 +115,17 @@ export default function Quality() {
   const [selectedCall, setSelectedCall] = useState<CallLog | null>(null);
   const [loading, setLoading] = useState(true);
   const [audioErrorMap, setAudioErrorMap] = useState<Record<string, boolean>>({});
+
+  // Audio Player State
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [currentTime, setCurrentTime] = useState(0);
+  const [audioDuration, setAudioDuration] = useState(0);
+  const [volume, setVolume] = useState(1);
+  const [isMuted, setIsMuted] = useState(false);
+  const [playbackRate, setPlaybackRate] = useState(1);
+  const [audioLoading, setAudioLoading] = useState(false);
+  const [playbackUrl, setPlaybackUrl] = useState<string>("");
 
   // Form Evaluation state
   const [coachingNotes, setCoachingNotes] = useState("");
@@ -114,10 +148,14 @@ export default function Quality() {
     loadData();
   }, [loadData]);
 
-
-
   const selectCallToAudit = (call: CallLog) => {
     setSelectedCall(call);
+    setIsPlaying(false);
+    setCurrentTime(0);
+    setAudioDuration(call.duration_seconds || 0);
+    setAudioLoading(false);
+    const audioUrl = getRecordingAudioUrl(call);
+    setPlaybackUrl(audioUrl || "");
     
     // Pre-fill form if evaluation exists
     if (call.quality_evaluation) {
@@ -130,6 +168,57 @@ export default function Quality() {
       setAiQualityScore(0);
       setComplianceScore(0);
       setSentiment("");
+    }
+  };
+
+  const togglePlay = () => {
+    if (!audioRef.current) return;
+    if (isPlaying) {
+      audioRef.current.pause();
+    } else {
+      audioRef.current.play().catch((err) => {
+        console.warn("[QUALITY AUDIO] Play failed:", err);
+        setIsPlaying(false);
+      });
+    }
+  };
+
+  const handleSkip = (seconds: number) => {
+    if (!audioRef.current) return;
+    const newTime = Math.max(0, Math.min((audioDuration || 1000), audioRef.current.currentTime + seconds));
+    audioRef.current.currentTime = newTime;
+    setCurrentTime(newTime);
+  };
+
+  const handleSeek = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const val = parseFloat(e.target.value);
+    setCurrentTime(val);
+    if (audioRef.current) {
+      audioRef.current.currentTime = val;
+    }
+  };
+
+  const toggleMute = () => {
+    if (!audioRef.current) return;
+    const nextMute = !isMuted;
+    setIsMuted(nextMute);
+    audioRef.current.muted = nextMute;
+  };
+
+  const handleVolumeChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const val = parseFloat(e.target.value);
+    setVolume(val);
+    setIsMuted(val === 0);
+    if (audioRef.current) {
+      audioRef.current.volume = val;
+      audioRef.current.muted = val === 0;
+    }
+  };
+
+  const handleRateChange = (rate: number) => {
+    setPlaybackRate(rate);
+    if (audioRef.current) {
+      audioRef.current.playbackRate = rate;
     }
   };
 
@@ -289,7 +378,7 @@ export default function Quality() {
           {selectedCall ? (
             <div className="bg-white dark:bg-[#111827] rounded-[20px] p-6 shadow-md border border-slate-200/80 dark:border-white/10 space-y-6">
               
-              {/* Call identity & Audio player panel */}
+              {/* Call identity Header */}
               <div className="bg-slate-50 dark:bg-[#172033] border border-slate-200/80 dark:border-white/10 p-5 rounded-[20px] flex flex-col md:flex-row justify-between items-start md:items-center gap-4 shadow-xs">
                 <div className="space-y-1">
                   <h3 className="font-black text-slate-900 dark:text-[#F8FAFC] text-lg font-mono flex items-center gap-2">
@@ -306,39 +395,249 @@ export default function Quality() {
                     </span>
                     <span>·</span>
                     <span className="flex items-center gap-1.5"><Calendar className="h-3.5 w-3.5 text-[#2563EB] dark:text-[#60A5FA]" /> Date: {new Date(selectedCall.started_at).toLocaleString()}</span>
+                    <span>·</span>
+                    <span className="flex items-center gap-1.5"><Clock className="h-3.5 w-3.5 text-[#2563EB] dark:text-[#60A5FA]" /> Duration: {formatSeconds(selectedCall.duration_seconds)}</span>
                   </div>
                 </div>
-                
-                {/* Audio player */}
-                {(() => {
-                  const callId = selectedCall.id || (selectedCall as any)._id;
-                  const hasError = callId ? audioErrorMap[callId] : false;
-                  const audioUrl = getRecordingAudioUrl(selectedCall);
 
-                  return audioUrl && !hasError ? (
-                    <div className="flex items-center gap-3.5 bg-white dark:bg-[#111827] border border-slate-200 dark:border-white/10 px-4 py-2.5 rounded-[16px] shadow-sm self-start md:self-center">
-                      <audio
-                        controls
-                        src={audioUrl}
-                        className="w-64 h-10"
-                        onError={() => {
-                          console.warn(`[QUALITY] Audio load error for call ${callId}`);
-                          if (callId) {
-                            setAudioErrorMap((prev) => ({ ...prev, [callId]: true }));
-                          }
-                        }}
-                      />
-                    </div>
-                  ) : (
-                    <div className="flex items-center gap-3.5 bg-white dark:bg-[#111827] border border-slate-200 dark:border-white/10 px-4 py-2.5 rounded-[16px] shadow-sm self-start md:self-center text-xs font-bold text-slate-400 dark:text-slate-500">
-                      <span className="flex items-center gap-2">
-                        <Volume2 className="h-4 w-4 text-slate-400" />
-                        {hasError ? "Recording unavailable" : "No Recording Available"}
-                      </span>
+                <div className="flex items-center gap-2">
+                  <span className="inline-flex items-center gap-1 px-3 py-1 rounded-full text-[10px] font-bold bg-emerald-50 dark:bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border border-emerald-200 dark:border-emerald-500/20 shadow-2xs">
+                    <span className="h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                    CALL COMPLETED
+                  </span>
+                </div>
+              </div>
+
+              {/* ── PLAYER & AUDIO SECTION ─────────────────────────────────── */}
+              {(() => {
+                const callId = selectedCall.id || (selectedCall as any)._id;
+                const hasError = callId ? audioErrorMap[callId] : false;
+                const currentAudioSrc = playbackUrl || getRecordingAudioUrl(selectedCall);
+                const isUnavailable = !currentAudioSrc || hasError;
+
+                if (isUnavailable) {
+                  return (
+                    <div className="p-6 rounded-2xl bg-slate-50 dark:bg-[#172033] border border-slate-200/80 dark:border-white/10 text-center space-y-2 shadow-2xs">
+                      <div className="h-10 w-10 rounded-full bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-400 flex items-center justify-center mx-auto">
+                        <VolumeX className="h-5 w-5" />
+                      </div>
+                      <div>
+                        <h4 className="text-sm font-bold text-slate-800 dark:text-[#F8FAFC]">Recording Unavailable</h4>
+                        <p className="text-xs text-[#667085] dark:text-slate-400 mt-0.5">No voice recording stream is available for this call log.</p>
+                      </div>
                     </div>
                   );
-                })()}
-              </div>
+                }
+
+                return (
+                  <div className="p-5 rounded-2xl bg-white dark:bg-[#172033] border border-slate-200/80 dark:border-white/10 shadow-sm space-y-4">
+                    {/* Header with Mic/Recording indicator */}
+                    <div className="flex items-center justify-between border-b border-slate-100 dark:border-white/10 pb-3">
+                      <div className="flex items-center gap-2.5">
+                        <div className="h-8 w-8 rounded-xl bg-blue-50 dark:bg-blue-500/10 border border-blue-200/60 dark:border-blue-500/20 text-blue-600 dark:text-blue-400 flex items-center justify-center">
+                          <Mic className="h-4 w-4 text-blue-600 dark:text-blue-400 animate-pulse" />
+                        </div>
+                        <div>
+                          <div className="text-xs font-bold text-slate-900 dark:text-white flex items-center gap-1.5">
+                            <span>Call Recording</span>
+                            <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400 font-semibold uppercase">
+                              Cloudinary Audio
+                            </span>
+                          </div>
+                          <div className="text-[10px] text-slate-500 dark:text-slate-400 font-mono">
+                            {selectedCall.agent_name || "Agent"} ↔ {selectedCall.lead_name || selectedCall.phone || "Customer"}
+                          </div>
+                        </div>
+                      </div>
+
+                      <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[10px] font-bold bg-emerald-50 dark:bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border border-emerald-200 dark:border-emerald-500/20 shadow-2xs">
+                        <span className="h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                        AUTHENTICATED AUDIO
+                      </span>
+                    </div>
+
+                    {/* HTML5 Audio Element with Cloudinary Signed / Streaming Source */}
+                    <audio
+                      ref={audioRef}
+                      src={currentAudioSrc}
+                      preload="metadata"
+                      onTimeUpdate={() => {
+                        if (audioRef.current) {
+                          setCurrentTime(audioRef.current.currentTime);
+                        }
+                      }}
+                      onLoadedMetadata={() => {
+                        if (audioRef.current) {
+                          const dur = audioRef.current.duration;
+                          if (dur && !isNaN(dur) && dur > 0 && dur !== Infinity) {
+                            setAudioDuration(dur);
+                          }
+                          setAudioLoading(false);
+                        }
+                      }}
+                      onDurationChange={() => {
+                        if (audioRef.current) {
+                          const dur = audioRef.current.duration;
+                          if (dur && !isNaN(dur) && dur > 0 && dur !== Infinity) {
+                            setAudioDuration(dur);
+                          }
+                        }
+                      }}
+                      onWaiting={() => setAudioLoading(true)}
+                      onPlaying={() => {
+                        setAudioLoading(false);
+                        setIsPlaying(true);
+                      }}
+                      onPause={() => setIsPlaying(false)}
+                      onEnded={() => {
+                        setIsPlaying(false);
+                        setCurrentTime(0);
+                      }}
+                      onError={() => {
+                        setAudioLoading(false);
+                        console.warn(`[QUALITY] Audio load error for call ${callId}`);
+                        if (callId) {
+                          setAudioErrorMap((prev) => ({ ...prev, [callId]: true }));
+                        }
+                      }}
+                    />
+
+                    {/* Dynamic Interactive Waveform & Scrubber */}
+                    <div className="space-y-2">
+                      <div
+                        className="h-14 bg-slate-50 dark:bg-slate-900/60 border border-slate-200/80 dark:border-white/10 rounded-xl px-3 py-2 flex items-center justify-between gap-1 cursor-pointer select-none hover:border-blue-300 dark:hover:border-blue-500 transition-all shadow-2xs group relative overflow-hidden"
+                        onClick={(e) => {
+                          const rect = e.currentTarget.getBoundingClientRect();
+                          const clickRatio = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+                          const totalDur = audioDuration || selectedCall.duration_seconds || 1;
+                          const targetTime = clickRatio * totalDur;
+                          setCurrentTime(targetTime);
+                          if (audioRef.current) audioRef.current.currentTime = targetTime;
+                        }}
+                        title="Click anywhere on waveform to seek"
+                      >
+                        {WAVEFORM_BARS.map((heightPercent, idx) => {
+                          const totalDur = audioDuration || selectedCall.duration_seconds || 1;
+                          const progressRatio = totalDur > 0 ? (currentTime / totalDur) : 0;
+                          const barRatio = idx / WAVEFORM_BARS.length;
+                          const isPlayed = barRatio <= progressRatio;
+
+                          return (
+                            <div key={idx} className="flex-1 flex items-center justify-center h-full">
+                              <div
+                                className={`w-full rounded-full transition-all duration-150 ${
+                                  isPlayed ? "bg-blue-600 shadow-xs" : "bg-slate-200 dark:bg-slate-700 group-hover:bg-slate-300 dark:group-hover:bg-slate-600"
+                                }`}
+                                style={{ height: `${Math.max(16, heightPercent)}%` }}
+                              />
+                            </div>
+                          );
+                        })}
+                      </div>
+
+                      {/* Time labels & Range slider scrubber */}
+                      <div className="space-y-1">
+                        <div className="flex items-center justify-between text-xs font-mono font-bold">
+                          <span className="text-blue-600 dark:text-blue-400">{formatSeconds(currentTime)}</span>
+                          <span className="text-slate-500 dark:text-slate-400">
+                            {formatSeconds(audioDuration || selectedCall.duration_seconds || 0)}
+                          </span>
+                        </div>
+                        <input
+                          type="range"
+                          min={0}
+                          max={audioDuration || selectedCall.duration_seconds || 100}
+                          step={0.1}
+                          value={currentTime}
+                          onChange={handleSeek}
+                          className="w-full h-2 bg-slate-200 dark:bg-slate-700 rounded-lg appearance-none cursor-pointer accent-blue-600"
+                        />
+                      </div>
+                    </div>
+
+                    {/* Primary Playback Controls */}
+                    <div className="flex items-center justify-between pt-1 flex-wrap gap-3">
+                      <div className="flex items-center space-x-2">
+                        <button
+                          type="button"
+                          onClick={() => handleSkip(-10)}
+                          className="p-2.5 rounded-xl bg-white dark:bg-slate-800 hover:bg-slate-100 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 border border-slate-200 dark:border-white/10 shadow-xs transition-all cursor-pointer hover:border-slate-300 active:scale-95"
+                          title="Rewind 10 seconds"
+                        >
+                          <RotateCcw className="h-4 w-4" />
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={togglePlay}
+                          className="h-12 w-12 rounded-xl bg-gradient-to-r from-blue-600 to-blue-700 hover:from-blue-500 hover:to-blue-600 text-white flex items-center justify-center font-bold shadow-md shadow-blue-500/25 transition-all cursor-pointer active:scale-95"
+                          title={isPlaying ? "Pause" : "Play"}
+                        >
+                          {audioLoading ? (
+                            <RefreshCw className="h-5 w-5 animate-spin text-white" />
+                          ) : isPlaying ? (
+                            <Pause className="h-5 w-5 fill-current" />
+                          ) : (
+                            <Play className="h-5 w-5 fill-current ml-0.5" />
+                          )}
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() => handleSkip(10)}
+                          className="p-2.5 rounded-xl bg-white dark:bg-slate-800 hover:bg-slate-100 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 border border-slate-200 dark:border-white/10 shadow-xs transition-all cursor-pointer hover:border-slate-300 active:scale-95"
+                          title="Forward 10 seconds"
+                        >
+                          <RotateCw className="h-4 w-4" />
+                        </button>
+                      </div>
+
+                      {/* Speed Selector */}
+                      <div className="flex items-center space-x-1 bg-slate-100 dark:bg-slate-800/80 border border-slate-200 dark:border-white/10 rounded-xl p-1">
+                        {[0.75, 1, 1.25, 1.5, 2].map((rate) => (
+                          <button
+                            key={rate}
+                            type="button"
+                            onClick={() => handleRateChange(rate)}
+                            className={`px-2 py-1 rounded-lg text-[10px] font-bold transition-all cursor-pointer ${
+                              playbackRate === rate
+                                ? "bg-blue-600 text-white shadow-xs"
+                                : "text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white"
+                            }`}
+                          >
+                            {rate}x
+                          </button>
+                        ))}
+                      </div>
+
+                      {/* Volume Control */}
+                      <div className="flex items-center space-x-1.5 w-32 bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-white/10 rounded-xl px-2.5 py-1.5">
+                        <button
+                          type="button"
+                          onClick={toggleMute}
+                          className="text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-white p-0.5 cursor-pointer"
+                          title={isMuted ? "Unmute" : "Mute"}
+                        >
+                          {isMuted || volume === 0 ? (
+                            <VolumeX className="h-4 w-4 text-rose-500" />
+                          ) : (
+                            <Volume2 className="h-4 w-4 text-slate-700 dark:text-slate-300" />
+                          )}
+                        </button>
+                        <input
+                          type="range"
+                          min={0}
+                          max={1}
+                          step={0.05}
+                          value={isMuted ? 0 : volume}
+                          onChange={handleVolumeChange}
+                          className="w-16 h-1.5 bg-slate-200 dark:bg-slate-700 rounded-lg appearance-none cursor-pointer accent-blue-600"
+                        />
+                      </div>
+                    </div>
+                  </div>
+                );
+              })()}
 
               <div className="flex justify-center mt-6">
                 
