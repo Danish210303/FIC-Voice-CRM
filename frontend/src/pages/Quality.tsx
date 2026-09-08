@@ -23,6 +23,12 @@ type CallLog = {
   id: string;
   lead_id: string;
   agent_id: string;
+  agent_name?: string;
+  agent_email?: string;
+  agent_employee_id?: string;
+  agent_department?: string;
+  lead_name?: string;
+  phone?: string;
   pool_id: string;
   direction: string;
   status: string;
@@ -242,10 +248,17 @@ export default function Quality() {
                     <div className="flex justify-between items-end gap-2 pt-1">
                       <div className="flex items-center gap-2.5 min-w-0">
                         <div className="h-8 w-8 rounded-xl bg-gradient-to-tr from-[#2563EB] to-[#3B82F6] text-white font-black text-xs flex items-center justify-center shadow-xs shrink-0 border border-blue-400/30">
-                          {c.agent_id ? c.agent_id[0].toUpperCase() : "A"}
+                          {(c.agent_name || c.agent_id || "A")[0].toUpperCase()}
                         </div>
                         <div className="min-w-0">
-                          <div className="text-xs font-black text-slate-900 dark:text-[#F8FAFC] truncate">Agent: {c.agent_id}</div>
+                          <div className="text-xs font-black text-slate-900 dark:text-[#F8FAFC] truncate" title={`${c.agent_name || 'Agent'}${c.agent_employee_id ? ` (${c.agent_employee_id})` : ''}`}>
+                            {c.agent_name || "Agent"}
+                            {c.agent_employee_id && c.agent_employee_id !== c.agent_name && (
+                              <span className="ml-1 text-[10px] font-normal text-slate-400 dark:text-slate-500 font-mono">
+                                ({c.agent_employee_id.length > 14 ? c.agent_employee_id.slice(-6) : c.agent_employee_id})
+                              </span>
+                            )}
+                          </div>
                           <div className="text-[10px] text-slate-400 dark:text-[#64748B] font-semibold">{new Date(c.started_at).toLocaleString()}</div>
                         </div>
                       </div>
@@ -284,7 +297,13 @@ export default function Quality() {
                     <span className="text-[#2563EB] dark:text-[#60A5FA]">{selectedCall.id.slice(-8).toUpperCase()}</span>
                   </h3>
                   <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-slate-500 dark:text-[#94A3B8] font-semibold">
-                    <span className="flex items-center gap-1.5"><User className="h-3.5 w-3.5 text-[#2563EB] dark:text-[#60A5FA]" /> Agent: {selectedCall.agent_id}</span>
+                    <span className="flex items-center gap-1.5">
+                      <User className="h-3.5 w-3.5 text-[#2563EB] dark:text-[#60A5FA]" />
+                      Agent: {selectedCall.agent_name || selectedCall.agent_id}
+                      {selectedCall.agent_employee_id && selectedCall.agent_employee_id !== selectedCall.agent_name && (
+                        <span className="text-[10px] font-mono text-slate-400">({selectedCall.agent_employee_id})</span>
+                      )}
+                    </span>
                     <span>·</span>
                     <span className="flex items-center gap-1.5"><Calendar className="h-3.5 w-3.5 text-[#2563EB] dark:text-[#60A5FA]" /> Date: {new Date(selectedCall.started_at).toLocaleString()}</span>
                   </div>

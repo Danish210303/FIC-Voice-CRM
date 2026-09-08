@@ -1,21 +1,38 @@
+import asyncio
 import logging
 import time
 import traceback
 
-# pyrefly: ignore [missing-import]
 from fastapi import FastAPI, HTTPException, Request, status
-# pyrefly: ignore [missing-import]
 from fastapi.middleware.cors import CORSMiddleware
-# pyrefly: ignore [missing-import]
 from fastapi.responses import JSONResponse, Response
 from fastapi.middleware.gzip import GZipMiddleware
 from app.core.config import settings
 from app.core.database import init_indexes, check_db_connection
 from app.core.http import get_http_client, close_http_client
 from app.routes import auth, users, pools, campaigns, leads, calls, leave, reports, ws, ai_agents, presence, attendance, recordings
+from app.services.cleanup_service import purge_expired_calls_and_recordings
 
 # ── Logging ──────────────────────────────────────────────────────────────────
 logger = logging.getLogger("uvicorn.error")
+
+_cleanup_task = None
+
+
+async def start_periodic_cleanup_job():
+    """Background cron that runs 24h retention cleanup every 10 minutes."""
+    while True:
+        try:
+            await asyncio.sleep(600)
+            res = await purge_expired_calls_and_recordings(retention_hours=24.0)
+            if res.get("deleted_calls", 0) > 0 or res.get("deleted_recordings", 0) > 0:
+                logger.info(f"[24H CLEANUP CRON] Purged {res['deleted_calls']} calls & {res['deleted_recordings']} recordings")
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.error(f"[24H CLEANUP CRON ERROR] {e}")
+            await asyncio.sleep(60)
+
 
 app = FastAPI(
     title="Forge India Connect — AI Voice Calling CRM API",
@@ -199,9 +216,18 @@ async def on_startup():
     else:
         logger.info("Vapi AI Configuration: All required credentials loaded successfully.")
 
+    # Start persistent 24-hour retention cleanup background job (runs every 10 min)
+    global _cleanup_task
+    _cleanup_task = asyncio.create_task(start_periodic_cleanup_job())
+    # Run immediate pass on startup
+    asyncio.create_task(purge_expired_calls_and_recordings(retention_hours=24.0))
+
 
 @app.on_event("shutdown")
 async def on_shutdown():
+    global _cleanup_task
+    if _cleanup_task and not _cleanup_task.done():
+        _cleanup_task.cancel()
     await close_http_client()
 
 

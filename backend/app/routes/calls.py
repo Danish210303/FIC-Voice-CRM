@@ -29,6 +29,7 @@ from app.schemas.common import (
     CallDispositionPayload,
 )
 from app.services.ws_manager import ws_manager
+from app.services.cleanup_service import purge_expired_calls_and_recordings
 from app.routes.presence import record_call_completion, record_presence_change
 from app.routes.recordings import handle_call_recording_start, handle_call_recording_completed
 
@@ -957,25 +958,44 @@ async def end_call(payload: CallEnd):
 
 
 @router.get("")
-async def list_calls(user: dict = Depends(get_current_user), pool_id: str | None = None,
-                      agent_id: str | None = None, status_filter: str | None = None):
+async def list_calls(
+    user: dict = Depends(get_current_user),
+    pool_id: str | None = None,
+    agent_id: str | None = None,
+    status_filter: str | None = None,
+    limit: int = Query(500, ge=1, le=1000)
+):
     query = {}
-    if user["role"] == Role.AGENT:
-        query["agent_id"] = _uid(user)
-    elif user["role"] == Role.TEAM_LEADER:
-        assigned_agents = await users_col.find({"supervisor_id": _uid(user), "role": Role.AGENT}).to_list(length=1000)
-        agent_ids = [str(a["_id"]) for a in assigned_agents]
-        query["agent_id"] = {"$in": agent_ids}
-        
+    user_role = str(user.get("role", "")).lower()
+    uid = _uid(user)
+
+    # Role-based scoping
+    if user_role in (Role.AGENT, "agent"):
+        query["$or"] = [{"agent_id": uid}, {"agent_id": str(uid)}]
+    elif user_role in (Role.TEAM_LEADER, "team_leader", "supervisor"):
+        assigned_agents = await users_col.find({"supervisor_id": uid, "role": Role.AGENT}).to_list(length=1000)
+        agent_ids = [str(a["_id"]) for a in assigned_agents] + [uid]
+        if agent_id:
+            if agent_id in agent_ids:
+                query["agent_id"] = agent_id
+            else:
+                query["agent_id"] = {"$in": agent_ids}
+        else:
+            query["agent_id"] = {"$in": agent_ids}
+    else:
+        # Admin / Manager: can view all agents or filter specifically
+        if agent_id:
+            query["agent_id"] = agent_id
+
     if pool_id:
         query["pool_id"] = pool_id
-    if agent_id:
-        query["agent_id"] = agent_id
     if status_filter:
         query["status"] = status_filter
-        
-    calls_raw = await calls_col.find(query).sort("started_at", -1).limit(500).to_list(length=500)
-    
+
+    limit_val = int(limit) if isinstance(limit, int) else (int(str(limit)) if isinstance(limit, str) and str(limit).isdigit() else 500)
+    calls_raw = await calls_col.find(query).sort("started_at", -1).limit(limit_val).to_list(length=limit_val)
+
+    # 1. Batch resolve missing leads
     missing_lead_oids = []
     missing_lead_str_ids = []
     for c in calls_raw:
@@ -993,27 +1013,90 @@ async def list_calls(user: dict = Depends(get_current_user), pool_id: str | None
         if missing_lead_str_ids:
             or_conds.append({"lead_id": {"$in": missing_lead_str_ids}})
             or_conds.append({"phone": {"$in": missing_lead_str_ids}})
-        
-        found_leads = await leads_col.find({"$or": or_conds}, {"_id": 1, "lead_id": 1, "phone": 1, "name": 1}).to_list(length=1000)
+
+        found_leads = await leads_col.find(
+            {"$or": or_conds},
+            {"_id": 1, "lead_id": 1, "phone": 1, "name": 1}
+        ).to_list(length=1000)
         for ld in found_leads:
-            l_oid_str = str(ld["_id"])
-            l_custom_id = ld.get("lead_id")
-            l_phone = ld.get("phone")
-            
-            lead_map[l_oid_str] = ld
-            if l_custom_id: lead_map[l_custom_id] = ld
-            if l_phone: lead_map[l_phone] = ld
+            lead_map[str(ld["_id"])] = ld
+            if ld.get("lead_id"):
+                lead_map[ld["lead_id"]] = ld
+            if ld.get("phone"):
+                lead_map[ld["phone"]] = ld
+
+    # 2. Batch resolve agents from users_col for accurate agent attribution
+    agent_oids = []
+    agent_raw_ids = []
+    for c in calls_raw:
+        aid = c.get("agent_id")
+        if aid:
+            aid_str = str(aid)
+            if ObjectId.is_valid(aid_str):
+                agent_oids.append(ObjectId(aid_str))
+            agent_raw_ids.append(aid_str)
+
+    user_map = {}
+    if agent_oids or agent_raw_ids:
+        u_conds = []
+        if agent_oids:
+            u_conds.append({"_id": {"$in": agent_oids}})
+        if agent_raw_ids:
+            u_conds.append({"id": {"$in": agent_raw_ids}})
+            u_conds.append({"email": {"$in": agent_raw_ids}})
+            u_conds.append({"employee_id": {"$in": agent_raw_ids}})
+
+        found_users = await users_col.find(
+            {"$or": u_conds},
+            {"_id": 1, "name": 1, "email": 1, "role": 1, "employee_id": 1, "department": 1, "agent_phone": 1}
+        ).to_list(length=1000)
+
+        for u in found_users:
+            u_oid_str = str(u["_id"])
+            user_map[u_oid_str] = u
+            if u.get("id"):
+                user_map[str(u["id"])] = u
+            if u.get("email"):
+                user_map[u["email"]] = u
+            if u.get("employee_id"):
+                user_map[u["employee_id"]] = u
 
     calls = []
     for c in calls_raw:
+        # Lead attribution
         if not c.get("phone") and c.get("lead_id"):
             lid = str(c.get("lead_id"))
             lead = lead_map.get(lid)
             if lead:
                 c["phone"] = lead.get("phone", "")
                 c["lead_name"] = lead.get("name", "")
+
+        # Agent attribution: real agent/user name and ID
+        aid = str(c.get("agent_id")) if c.get("agent_id") else None
+        if aid and aid in user_map:
+            u_info = user_map[aid]
+            c["agent_name"] = u_info.get("name") or c.get("agent_name") or "Sales Agent"
+            c["agent_email"] = u_info.get("email")
+            c["agent_employee_id"] = u_info.get("employee_id") or aid
+            c["agent_department"] = u_info.get("department")
+        else:
+            if not c.get("agent_name"):
+                c["agent_name"] = "Sales Agent" if aid else "Unassigned"
+            if not c.get("agent_employee_id") and aid:
+                c["agent_employee_id"] = aid
+
         calls.append(oid_str(c))
     return calls
+
+
+@router.post("/cleanup-expired", dependencies=[Depends(require_roles(Role.ADMIN, Role.TEAM_LEADER))])
+@router.get("/cleanup-expired", dependencies=[Depends(require_roles(Role.ADMIN, Role.TEAM_LEADER))])
+async def trigger_retention_cleanup(retention_hours: float = Query(24.0, ge=0.01, le=8760.0), user: dict = Depends(get_current_user)):
+    """
+    Manually triggers or tests the 24-hour expiration and storage cleanup for completed shift logs and recordings.
+    """
+    res = await purge_expired_calls_and_recordings(retention_hours=retention_hours)
+    return res
 
 
 @router.get("/live")
