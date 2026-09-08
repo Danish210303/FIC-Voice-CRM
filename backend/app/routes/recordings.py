@@ -511,10 +511,37 @@ async def list_recordings(
     cursor = recordings_col.find(filter_query).sort("created_at", -1).skip(skip).limit(limit)
     recordings_raw = await cursor.to_list(length=limit)
 
+    call_ids = [r.get("call_id") for r in recordings_raw if r.get("call_id")]
+    call_map = {}
+    if call_ids:
+        c_oids = [ObjectId(cid) for cid in call_ids if ObjectId.is_valid(cid)]
+        call_docs = await calls_col.find({"$or": [{"_id": {"$in": c_oids}}, {"id": {"$in": call_ids}}, {"call_sid": {"$in": call_ids}}]}).to_list(length=1000)
+        for cd in call_docs:
+            call_map[str(cd["_id"])] = cd
+            if cd.get("id"):
+                call_map[str(cd["id"])] = cd
+            if cd.get("call_sid"):
+                call_map[str(cd["call_sid"])] = cd
+
     results = []
     for r in recordings_raw:
         item = oid_str(r)
-        # Mask phone number unless explicit admin view
+        cid = str(item.get("call_id") or "")
+        cdoc = call_map.get(cid)
+        if cdoc:
+            if not item.get("secure_url"):
+                item["secure_url"] = cdoc.get("secure_url") or cdoc.get("recording_url")
+            if not item.get("recording_url"):
+                item["recording_url"] = cdoc.get("recording_url") or item.get("secure_url")
+            if not item.get("public_id"):
+                item["public_id"] = cdoc.get("public_id")
+            if not item.get("duration_seconds") and cdoc.get("duration_seconds"):
+                item["duration_seconds"] = int(cdoc.get("duration_seconds", 0))
+            if not item.get("duration") and cdoc.get("duration_seconds"):
+                item["duration"] = int(cdoc.get("duration_seconds", 0))
+            if not item.get("customer_name") and cdoc.get("customer_name"):
+                item["customer_name"] = cdoc.get("customer_name")
+
         raw_phone = item.get("phone_number") or ""
         item["masked_phone"] = mask_phone_number(raw_phone)
         item["has_audio_file"] = bool(item.get("storage_path") and os.path.exists(item.get("storage_path", "")))
@@ -823,6 +850,16 @@ async def get_recording_details(recording_id: str, user: dict = Depends(get_curr
     # Enrich with latest call document data if available
     call_doc = await calls_col.find_one({"_id": ObjectId(rec["call_id"])} if ObjectId.is_valid(rec.get("call_id")) else {"id": rec.get("call_id")})
     if call_doc:
+        if not item.get("secure_url"):
+            item["secure_url"] = call_doc.get("secure_url") or call_doc.get("recording_url")
+        if not item.get("recording_url"):
+            item["recording_url"] = call_doc.get("recording_url") or item.get("secure_url")
+        if not item.get("public_id"):
+            item["public_id"] = call_doc.get("public_id")
+        if not item.get("duration_seconds") and call_doc.get("duration_seconds"):
+            item["duration_seconds"] = int(call_doc.get("duration_seconds", 0))
+        if not item.get("duration") and call_doc.get("duration_seconds"):
+            item["duration"] = int(call_doc.get("duration_seconds", 0))
         item["transcript"] = item.get("transcript") or call_doc.get("transcript")
         item["ai_summary"] = item.get("ai_summary") or call_doc.get("ai_summary")
         item["notes"] = item.get("notes") or call_doc.get("notes")

@@ -52,6 +52,8 @@ export type RecordingItem = {
   storage_provider?: "cloudinary" | "local_fallback" | string;
   public_id?: string;
   secure_url?: string;
+  recording_url?: string;
+  recording_file?: string;
   signed_playback_url?: string;
   duration?: number;
   duration_seconds: number;
@@ -108,10 +110,12 @@ const DISPOSITION_OPTIONS = [
   { value: "not_interested", label: "Not Interested" },
   { value: "busy", label: "Busy" },
   { value: "no_answer", label: "No Answer" },
-  { value: "wrong_number", label: "Wrong Number" },
-  { value: "qualified", label: "Qualified Lead" },
-  { value: "resolved", label: "Resolved" },
-  { value: "closed", label: "Closed" }
+  { value: "voicemail", label: "Voicemail" }
+];
+
+const WAVEFORM_BARS = [
+  30, 55, 40, 75, 60, 90, 45, 80, 95, 65, 85, 50, 70, 90, 100, 80, 65, 45, 75,
+  90, 85, 60, 40, 70, 95, 80, 65, 90, 100, 75, 55, 40, 65, 80, 50, 30
 ];
 
 export default function Recordings() {
@@ -325,9 +329,26 @@ export default function Recordings() {
   // Audio stream URL with auth token
   const getStreamFallbackUrl = (rec: RecordingItem) => {
     const recId = rec.id || rec._id || rec.call_id;
-    const token = getToken();
+    const token = getToken() || localStorage.getItem("access_token") || "";
     const base = getBaseUrl();
     return `${base}/api/recordings/${recId}/stream${token ? `?token=${encodeURIComponent(token)}` : ""}`;
+  };
+
+  const getEffectiveAudioUrl = (rec: RecordingItem | null): string => {
+    if (!rec) return "";
+    const token = getToken() || localStorage.getItem("access_token") || "";
+    const tokenQuery = token ? `?token=${encodeURIComponent(token)}` : "";
+    const base = getBaseUrl();
+
+    const directUrl = rec.secure_url || rec.recording_url || rec.remote_url;
+    if (directUrl && typeof directUrl === "string" && (directUrl.startsWith("http://") || directUrl.startsWith("https://"))) {
+      return directUrl;
+    }
+    const recId = rec.id || rec._id || rec.call_id;
+    if (recId) {
+      return `${base}/api/recordings/${recId}/stream${tokenQuery}`;
+    }
+    return "";
   };
 
   // Select a recording for inspection & playback
@@ -335,22 +356,26 @@ export default function Recordings() {
     setSelectedRec(rec);
     setIsPlaying(false);
     setCurrentTime(0);
-    setAudioDuration(rec.duration_seconds || rec.duration || 0);
+    const initialDuration = Number(rec.duration_seconds || rec.duration || 0);
+    setAudioDuration(initialDuration);
     setAudioError(null);
+    setAudioLoading(false);
 
     const recId = rec.id || rec._id || rec.call_id;
-    
-    // Set direct Cloudinary secure_url or streaming fallback URL
-    let streamUrl = (rec.secure_url && rec.secure_url.startsWith("http")) ? rec.secure_url : getStreamFallbackUrl(rec);
-    setPlaybackUrl(streamUrl);
+    const initialUrl = getEffectiveAudioUrl(rec);
+    setPlaybackUrl(initialUrl);
 
     // Fetch full details & secure playback URL
     try {
       const fullDoc = await api.get(`/api/recordings/${recId}`);
       if (fullDoc) {
         setSelectedRec(fullDoc);
-        if (fullDoc.secure_url && fullDoc.secure_url.startsWith("http")) {
-          setPlaybackUrl(fullDoc.secure_url);
+        const bestUrl = getEffectiveAudioUrl(fullDoc);
+        if (bestUrl) {
+          setPlaybackUrl(bestUrl);
+        }
+        if (fullDoc.duration_seconds || fullDoc.duration) {
+          setAudioDuration(Number(fullDoc.duration_seconds || fullDoc.duration));
         }
       }
 
@@ -1275,154 +1300,249 @@ export default function Recordings() {
                 {/* ── TAB 1: PLAYER & AUDIO ───────────────────────────────────── */}
                 {activeTab === "player" && (
                   <div className="space-y-4">
-                    {/* Audio Player Card */}
-                    <div className="p-4 rounded-xl bg-slate-50 border border-[#E4E7EC] shadow-xs space-y-4">
-                      {/* Hidden HTML5 Audio Element with Cloudinary Signed / Streaming Source */}
-                      <audio
-                        ref={audioRef}
-                        src={playbackUrl || getStreamFallbackUrl(selectedRec)}
-                        preload="metadata"
-                        onTimeUpdate={() => {
-                          if (audioRef.current) {
-                            setCurrentTime(audioRef.current.currentTime);
-                          }
-                        }}
-                        onCanPlay={() => {
-                          const dur = audioRef.current?.duration || selectedRec.duration_seconds || selectedRec.duration || 0;
-                          console.log(`[PLAYER] audioUrl: ${playbackUrl || getStreamFallbackUrl(selectedRec)} | canPlay: true | duration: ${dur} | loadError: none`);
-                        }}
-                        onLoadedMetadata={() => {
-                          if (audioRef.current) {
-                            const dur = audioRef.current.duration || selectedRec.duration_seconds || selectedRec.duration || 0;
-                            setAudioDuration(dur);
-                            setAudioLoading(false);
-                            console.log(`[PLAYER] audioUrl: ${playbackUrl || getStreamFallbackUrl(selectedRec)} | canPlay: true | duration: ${dur} | loadError: none`);
-                          }
-                        }}
-                        onWaiting={() => setAudioLoading(true)}
-                        onPlaying={() => setAudioLoading(false)}
-                        onEnded={() => setIsPlaying(false)}
-                        onError={(e) => {
-                          console.error(`[PLAYER] audioUrl: ${playbackUrl || getStreamFallbackUrl(selectedRec)} | canPlay: false | duration: 0 | loadError: Audio stream unavailable`);
-                          setAudioLoading(false);
-                          setAudioError("Audio stream is currently processing or unavailable.");
-                        }}
-                      />
+                    {(() => {
+                      const currentAudioSrc = playbackUrl || getEffectiveAudioUrl(selectedRec);
+                      const isUnavailable = !currentAudioSrc || selectedRec.status === "FAILED";
 
-                      {/* Scrubber / Progress Bar */}
-                      <div className="space-y-1.5">
-                        <div className="flex items-center justify-between text-xs font-mono font-semibold">
-                          <span className="text-blue-600">{formatSeconds(currentTime)}</span>
-                          <span className="text-[#667085]">{formatSeconds(audioDuration || selectedRec.duration_seconds || selectedRec.duration || 0)}</span>
-                        </div>
-                        <input
-                          type="range"
-                          min={0}
-                          max={audioDuration || selectedRec.duration_seconds || selectedRec.duration || 100}
-                          step={0.1}
-                          value={currentTime}
-                          onChange={handleSeek}
-                          disabled={selectedRec.status !== "READY"}
-                          className="w-full h-2 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-blue-600 disabled:opacity-40"
-                        />
-                      </div>
+                      if (isUnavailable) {
+                        return (
+                          <div className="p-8 rounded-2xl bg-slate-50 border border-[#E4E7EC] text-center space-y-3 shadow-2xs">
+                            <div className="h-12 w-12 rounded-full bg-slate-100 border border-slate-200 text-slate-400 flex items-center justify-center mx-auto">
+                              <VolumeX className="h-6 w-6" />
+                            </div>
+                            <div>
+                              <h4 className="text-sm font-bold text-slate-800">Recording Unavailable</h4>
+                              <p className="text-xs text-[#667085] mt-1">No voice audio asset is available for this call log.</p>
+                            </div>
+                          </div>
+                        );
+                      }
 
-                      {/* Primary Playback Controls */}
-                      <div className="flex items-center justify-between pt-1 flex-wrap gap-2">
-                        <div className="flex items-center space-x-2">
-                          <button
-                            onClick={() => handleSkip(-10)}
-                            disabled={selectedRec.status !== "READY"}
-                            className="p-2 rounded-xl bg-white hover:bg-slate-100 text-slate-700 border border-[#E4E7EC] shadow-xs transition-all disabled:opacity-40 cursor-pointer"
-                            title="Rewind 10 seconds"
-                          >
-                            <RotateCcw className="h-4 w-4" />
-                          </button>
+                      return (
+                        <div className="p-5 rounded-2xl bg-white border border-[#E4E7EC] shadow-sm space-y-4">
+                          {/* Header with Mic/Recording indicator */}
+                          <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+                            <div className="flex items-center gap-2.5">
+                              <div className="h-8 w-8 rounded-xl bg-blue-50 border border-blue-200/60 text-blue-600 flex items-center justify-center">
+                                <Mic className="h-4 w-4 text-blue-600 animate-pulse" />
+                              </div>
+                              <div>
+                                <div className="text-xs font-bold text-[#111827] flex items-center gap-1.5">
+                                  <span>Call Recording</span>
+                                  <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-slate-100 text-slate-600 font-semibold uppercase">
+                                    {selectedRec.format?.toUpperCase() || "WAV"}
+                                  </span>
+                                </div>
+                                <div className="text-[10px] text-[#667085] font-mono">
+                                  {formatFileSize(selectedRec.file_size_bytes || selectedRec.bytes)} • Cloudinary Audio
+                                </div>
+                              </div>
+                            </div>
 
-                          <button
-                            onClick={togglePlay}
-                            disabled={selectedRec.status !== "READY"}
-                            className="h-11 w-11 rounded-xl bg-gradient-to-r from-blue-600 to-blue-700 hover:from-blue-500 hover:to-blue-600 text-white flex items-center justify-center font-bold shadow-md shadow-blue-500/20 transition-all disabled:opacity-40 disabled:pointer-events-none cursor-pointer active:scale-95"
-                            title={isPlaying ? "Pause" : "Play"}
-                          >
-                            {audioLoading ? (
-                              <RefreshCw className="h-5 w-5 animate-spin text-white" />
-                            ) : isPlaying ? (
-                              <Pause className="h-5 w-5 fill-current" />
-                            ) : (
-                              <Play className="h-5 w-5 fill-current ml-0.5" />
-                            )}
-                          </button>
+                            <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[10px] font-bold bg-emerald-50 text-emerald-700 border border-emerald-200 shadow-2xs">
+                              <span className="h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                              AUTHENTICATED AUDIO
+                            </span>
+                          </div>
 
-                          <button
-                            onClick={() => handleSkip(10)}
-                            disabled={selectedRec.status !== "READY"}
-                            className="p-2 rounded-xl bg-white hover:bg-slate-100 text-slate-700 border border-[#E4E7EC] shadow-xs transition-all disabled:opacity-40 cursor-pointer"
-                            title="Forward 10 seconds"
-                          >
-                            <RotateCw className="h-4 w-4" />
-                          </button>
-                        </div>
-
-                        {/* Speed Selector */}
-                        <div className="flex items-center space-x-1 bg-white border border-[#E4E7EC] rounded-lg p-0.5">
-                          {[0.75, 1, 1.25, 1.5, 2].map((rate) => (
-                            <button
-                              key={rate}
-                              onClick={() => handleRateChange(rate)}
-                              className={`px-2 py-0.5 rounded text-[10px] font-bold transition-all cursor-pointer ${
-                                playbackRate === rate
-                                  ? "bg-blue-600 text-white shadow-xs"
-                                  : "text-slate-600 hover:text-slate-900"
-                              }`}
-                            >
-                              {rate}x
-                            </button>
-                          ))}
-                        </div>
-
-                        {/* Volume Control */}
-                        <div className="flex items-center space-x-1.5 w-28">
-                          <button
-                            onClick={toggleMute}
-                            className="text-slate-500 hover:text-slate-800 p-1 cursor-pointer"
-                          >
-                            {isMuted || volume === 0 ? (
-                              <VolumeX className="h-4 w-4 text-rose-500" />
-                            ) : (
-                              <Volume2 className="h-4 w-4 text-slate-700" />
-                            )}
-                          </button>
-                          <input
-                            type="range"
-                            min={0}
-                            max={1}
-                            step={0.05}
-                            value={isMuted ? 0 : volume}
-                            onChange={handleVolumeChange}
-                            className="w-16 h-1.5 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-blue-600"
+                          {/* HTML5 Audio Element with Cloudinary Signed / Streaming Source */}
+                          <audio
+                            ref={audioRef}
+                            src={currentAudioSrc}
+                            preload="metadata"
+                            onTimeUpdate={() => {
+                              if (audioRef.current) {
+                                setCurrentTime(audioRef.current.currentTime);
+                              }
+                            }}
+                            onLoadedMetadata={() => {
+                              if (audioRef.current) {
+                                const dur = audioRef.current.duration;
+                                if (dur && !isNaN(dur) && dur > 0 && dur !== Infinity) {
+                                  setAudioDuration(dur);
+                                }
+                                setAudioLoading(false);
+                              }
+                            }}
+                            onDurationChange={() => {
+                              if (audioRef.current) {
+                                const dur = audioRef.current.duration;
+                                if (dur && !isNaN(dur) && dur > 0 && dur !== Infinity) {
+                                  setAudioDuration(dur);
+                                }
+                              }
+                            }}
+                            onWaiting={() => setAudioLoading(true)}
+                            onPlaying={() => {
+                              setAudioLoading(false);
+                              setIsPlaying(true);
+                            }}
+                            onPause={() => setIsPlaying(false)}
+                            onEnded={() => {
+                              setIsPlaying(false);
+                              setCurrentTime(0);
+                            }}
+                            onError={() => {
+                              setAudioLoading(false);
+                              const fallback = getStreamFallbackUrl(selectedRec);
+                              if (playbackUrl !== fallback) {
+                                console.warn("[PLAYER] Switching from direct Cloudinary to streaming proxy:", fallback);
+                                setPlaybackUrl(fallback);
+                              } else {
+                                setAudioError("Recording audio stream unavailable or processing.");
+                              }
+                            }}
                           />
-                        </div>
-                      </div>
 
-                      {/* Error State Banner */}
-                      {audioError && (
-                        <div className="p-3 rounded-xl bg-rose-50 border border-rose-200 text-rose-700 text-xs flex items-center justify-between">
-                          <span className="flex items-center gap-1.5 font-medium">
-                            <AlertCircle className="h-4 w-4 text-rose-600 shrink-0" />
-                            {audioError}
-                          </span>
-                          {isSupervisor && (
-                            <button
-                              onClick={() => handleRetry(selectedRec)}
-                              className="px-2.5 py-1 rounded-lg bg-rose-600 hover:bg-rose-700 text-white font-bold text-[10px] shadow-xs cursor-pointer"
+                          {/* Dynamic Interactive Waveform & Scrubber */}
+                          <div className="space-y-2">
+                            <div
+                              className="h-14 bg-slate-50 border border-[#E4E7EC] rounded-xl px-3 py-2 flex items-center justify-between gap-1 cursor-pointer select-none hover:border-blue-300 transition-all shadow-2xs group relative overflow-hidden"
+                              onClick={(e) => {
+                                const rect = e.currentTarget.getBoundingClientRect();
+                                const clickRatio = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+                                const totalDur = audioDuration || selectedRec.duration_seconds || selectedRec.duration || 1;
+                                const targetTime = clickRatio * totalDur;
+                                setCurrentTime(targetTime);
+                                if (audioRef.current) audioRef.current.currentTime = targetTime;
+                              }}
+                              title="Click anywhere on waveform to seek"
                             >
-                              Retry
-                            </button>
+                              {WAVEFORM_BARS.map((heightPercent, idx) => {
+                                const totalDur = audioDuration || selectedRec.duration_seconds || selectedRec.duration || 1;
+                                const progressRatio = totalDur > 0 ? (currentTime / totalDur) : 0;
+                                const barRatio = idx / WAVEFORM_BARS.length;
+                                const isPlayed = barRatio <= progressRatio;
+
+                                return (
+                                  <div key={idx} className="flex-1 flex items-center justify-center h-full">
+                                    <div
+                                      className={`w-full rounded-full transition-all duration-150 ${
+                                        isPlayed ? "bg-blue-600 shadow-xs" : "bg-slate-200 group-hover:bg-slate-300"
+                                      }`}
+                                      style={{ height: `${Math.max(16, heightPercent)}%` }}
+                                    />
+                                  </div>
+                                );
+                              })}
+                            </div>
+
+                            {/* Time labels & Range slider scrubber */}
+                            <div className="space-y-1">
+                              <div className="flex items-center justify-between text-xs font-mono font-bold">
+                                <span className="text-blue-600">{formatSeconds(currentTime)}</span>
+                                <span className="text-[#667085]">
+                                  {formatSeconds(audioDuration || selectedRec.duration_seconds || selectedRec.duration || 0)}
+                                </span>
+                              </div>
+                              <input
+                                type="range"
+                                min={0}
+                                max={audioDuration || selectedRec.duration_seconds || selectedRec.duration || 100}
+                                step={0.1}
+                                value={currentTime}
+                                onChange={handleSeek}
+                                className="w-full h-2 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-blue-600"
+                              />
+                            </div>
+                          </div>
+
+                          {/* Primary Playback Controls */}
+                          <div className="flex items-center justify-between pt-1 flex-wrap gap-3">
+                            <div className="flex items-center space-x-2">
+                              <button
+                                onClick={() => handleSkip(-10)}
+                                className="p-2.5 rounded-xl bg-white hover:bg-slate-100 text-slate-700 border border-[#E4E7EC] shadow-xs transition-all cursor-pointer hover:border-slate-300 active:scale-95"
+                                title="Rewind 10 seconds"
+                              >
+                                <RotateCcw className="h-4 w-4" />
+                              </button>
+
+                              <button
+                                onClick={togglePlay}
+                                className="h-12 w-12 rounded-xl bg-gradient-to-r from-blue-600 to-blue-700 hover:from-blue-500 hover:to-blue-600 text-white flex items-center justify-center font-bold shadow-md shadow-blue-500/25 transition-all cursor-pointer active:scale-95"
+                                title={isPlaying ? "Pause" : "Play"}
+                              >
+                                {audioLoading ? (
+                                  <RefreshCw className="h-5 w-5 animate-spin text-white" />
+                                ) : isPlaying ? (
+                                  <Pause className="h-5 w-5 fill-current" />
+                                ) : (
+                                  <Play className="h-5 w-5 fill-current ml-0.5" />
+                                )}
+                              </button>
+
+                              <button
+                                onClick={() => handleSkip(10)}
+                                className="p-2.5 rounded-xl bg-white hover:bg-slate-100 text-slate-700 border border-[#E4E7EC] shadow-xs transition-all cursor-pointer hover:border-slate-300 active:scale-95"
+                                title="Forward 10 seconds"
+                              >
+                                <RotateCw className="h-4 w-4" />
+                              </button>
+                            </div>
+
+                            {/* Speed Selector */}
+                            <div className="flex items-center space-x-1 bg-slate-100 border border-[#E4E7EC] rounded-xl p-1">
+                              {[0.75, 1, 1.25, 1.5, 2].map((rate) => (
+                                <button
+                                  key={rate}
+                                  onClick={() => handleRateChange(rate)}
+                                  className={`px-2 py-1 rounded-lg text-[10px] font-bold transition-all cursor-pointer ${
+                                    playbackRate === rate
+                                      ? "bg-blue-600 text-white shadow-xs"
+                                      : "text-slate-600 hover:text-slate-900"
+                                  }`}
+                                >
+                                  {rate}x
+                                </button>
+                              ))}
+                            </div>
+
+                            {/* Volume Control */}
+                            <div className="flex items-center space-x-1.5 w-32 bg-slate-50 border border-[#E4E7EC] rounded-xl px-2.5 py-1.5">
+                              <button
+                                onClick={toggleMute}
+                                className="text-slate-500 hover:text-slate-800 p-0.5 cursor-pointer"
+                                title={isMuted ? "Unmute" : "Mute"}
+                              >
+                                {isMuted || volume === 0 ? (
+                                  <VolumeX className="h-4 w-4 text-rose-500" />
+                                ) : (
+                                  <Volume2 className="h-4 w-4 text-slate-700" />
+                                )}
+                              </button>
+                              <input
+                                type="range"
+                                min={0}
+                                max={1}
+                                step={0.05}
+                                value={isMuted ? 0 : volume}
+                                onChange={handleVolumeChange}
+                                className="w-16 h-1.5 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-blue-600"
+                              />
+                            </div>
+                          </div>
+
+                          {/* Error State Banner */}
+                          {audioError && (
+                            <div className="p-3 rounded-xl bg-rose-50 border border-rose-200 text-rose-700 text-xs flex items-center justify-between">
+                              <span className="flex items-center gap-1.5 font-medium">
+                                <AlertCircle className="h-4 w-4 text-rose-600 shrink-0" />
+                                {audioError}
+                              </span>
+                              {isSupervisor && (
+                                <button
+                                  onClick={() => handleRetry(selectedRec)}
+                                  className="px-2.5 py-1 rounded-lg bg-rose-600 hover:bg-rose-700 text-white font-bold text-[10px] shadow-xs cursor-pointer"
+                                >
+                                  Retry
+                                </button>
+                              )}
+                            </div>
                           )}
                         </div>
-                      )}
-                    </div>
+                      );
+                    })()}
 
                     {/* Quick Call Overview Summary Card */}
                     <div className="p-4 rounded-xl bg-white border border-[#E4E7EC] space-y-3 text-xs shadow-xs">
