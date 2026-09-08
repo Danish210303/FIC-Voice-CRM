@@ -309,22 +309,25 @@ export default function Recordings() {
 
     const recId = rec.id || rec._id || rec.call_id;
     
-    // Set default streaming URL
-    let streamUrl = getStreamFallbackUrl(rec);
+    // Set direct Cloudinary secure_url or streaming fallback URL
+    let streamUrl = (rec.secure_url && rec.secure_url.startsWith("http")) ? rec.secure_url : getStreamFallbackUrl(rec);
     setPlaybackUrl(streamUrl);
 
-    // Fetch full details & secure Cloudinary signed playback URL
+    // Fetch full details & secure playback URL
     try {
       const fullDoc = await api.get(`/api/recordings/${recId}`);
       if (fullDoc) {
         setSelectedRec(fullDoc);
+        if (fullDoc.secure_url && fullDoc.secure_url.startsWith("http")) {
+          setPlaybackUrl(fullDoc.secure_url);
+        }
       }
 
       if (rec.status === "READY" || fullDoc?.status === "READY") {
         try {
           const securePlayback = await api.get(`/api/recordings/${recId}/secure-playback`);
-          if (securePlayback && securePlayback.signed_playback_url) {
-            setPlaybackUrl(securePlayback.signed_playback_url);
+          if (securePlayback && (securePlayback.secure_url || securePlayback.signed_playback_url)) {
+            setPlaybackUrl(securePlayback.secure_url || securePlayback.signed_playback_url);
           }
         } catch (secErr) {
           console.warn("[RECORDINGS] Secure playback URL fallback to direct stream:", secErr);

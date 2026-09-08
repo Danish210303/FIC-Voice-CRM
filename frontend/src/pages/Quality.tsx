@@ -36,6 +36,8 @@ type CallLog = {
   recording_file?: string;
   recording_url?: string;
   secure_url?: string;
+  public_id?: string;
+  recording_status?: string;
   quality_evaluation?: {
     coaching_notes: string;
     ai_quality_score: number;
@@ -52,21 +54,21 @@ const getRecordingAudioUrl = (call: CallLog | null): string | null => {
   const tokenQuery = token ? `?token=${encodeURIComponent(token)}` : "";
   const base = getBaseUrl();
 
-  const file = call.recording_file || call.recording_url || call.secure_url;
-  if (file) {
+  const file = call.secure_url || call.recording_url || call.recording_file;
+  if (file && typeof file === "string") {
     if (file.startsWith("http://") || file.startsWith("https://")) {
       return file;
     }
     if (file.startsWith("/api/")) {
       return `${base}${file}${tokenQuery}`;
     }
-    if (file.endsWith(".wav") || file.endsWith(".mp3") || file.endsWith(".ogg") || file.startsWith("rec_")) {
+    if (file.endsWith(".wav") || file.endsWith(".mp3") || file.endsWith(".ogg") || file.endsWith(".webm") || file.startsWith("rec_")) {
       return `${base}/api/recordings/${call.id}/stream${tokenQuery}`;
     }
   }
 
   const callId = call.id || (call as any)._id;
-  if (callId) {
+  if (callId && call.recording_status === "saved") {
     return `${base}/api/recordings/${callId}/stream${tokenQuery}`;
   }
   return null;
@@ -83,6 +85,7 @@ export default function Quality() {
   const [calls, setCalls] = useState<CallLog[]>([]);
   const [selectedCall, setSelectedCall] = useState<CallLog | null>(null);
   const [loading, setLoading] = useState(true);
+  const [audioErrorMap, setAudioErrorMap] = useState<Record<string, boolean>>({});
 
   // Form Evaluation state
   const [coachingNotes, setCoachingNotes] = useState("");
@@ -289,14 +292,30 @@ export default function Quality() {
                 
                 {/* Audio player */}
                 {(() => {
+                  const callId = selectedCall.id || (selectedCall as any)._id;
+                  const hasError = callId ? audioErrorMap[callId] : false;
                   const audioUrl = getRecordingAudioUrl(selectedCall);
-                  return audioUrl ? (
+
+                  return audioUrl && !hasError ? (
                     <div className="flex items-center gap-3.5 bg-white dark:bg-[#111827] border border-slate-200 dark:border-white/10 px-4 py-2.5 rounded-[16px] shadow-sm self-start md:self-center">
-                      <audio controls src={audioUrl} className="w-64 h-10" />
+                      <audio
+                        controls
+                        src={audioUrl}
+                        className="w-64 h-10"
+                        onError={() => {
+                          console.warn(`[QUALITY] Audio load error for call ${callId}`);
+                          if (callId) {
+                            setAudioErrorMap((prev) => ({ ...prev, [callId]: true }));
+                          }
+                        }}
+                      />
                     </div>
                   ) : (
-                    <div className="flex items-center gap-3.5 bg-white dark:bg-[#111827] border border-slate-200 dark:border-white/10 px-4 py-2.5 rounded-[16px] shadow-sm self-start md:self-center text-xs font-bold text-slate-500">
-                      <span className="flex items-center gap-2"><Volume2 className="h-4 w-4" /> No Recording Available</span>
+                    <div className="flex items-center gap-3.5 bg-white dark:bg-[#111827] border border-slate-200 dark:border-white/10 px-4 py-2.5 rounded-[16px] shadow-sm self-start md:self-center text-xs font-bold text-slate-400 dark:text-slate-500">
+                      <span className="flex items-center gap-2">
+                        <Volume2 className="h-4 w-4 text-slate-400" />
+                        {hasError ? "Recording unavailable" : "No Recording Available"}
+                      </span>
                     </div>
                   );
                 })()}

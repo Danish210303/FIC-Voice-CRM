@@ -5,6 +5,7 @@ import { api, getWsUrl } from "../api/client";
 import { useToast } from "../context/ToastContext";
 import { motion, AnimatePresence } from "framer-motion";
 import { plivoWebRTC } from "../services/plivoWebRTC";
+import { audioRecorder } from "../services/audioRecorder";
 import { CustomPauseIcon } from "../components/CustomPauseIcon";
 import { CustomSelect } from "../components/CustomSelect";
 import LeadFilterModal from "../components/LeadFilterModal";
@@ -13,6 +14,7 @@ import CallEventTimeline, { CallEventItem, CallEventType } from "../components/C
 import PauseBreakModal from "../components/PauseBreakModal";
 import ShiftSummaryModal from "../components/ShiftSummaryModal";
 import EarlyLogoutWarningModal from "../components/EarlyLogoutWarningModal";
+import { WrapUpPanel } from "../components/WrapUpPanel";
 import {
   Phone,
   PhoneCall,
@@ -271,7 +273,7 @@ export default function Dialer() {
   const [isTransferring, setIsTransferring] = useState(false);
 
   // WRAPUP / AFTER-CALL WORK STATE
-  const [disposition, setDisposition] = useState("interested");
+  const [disposition, setDisposition] = useState("");
   const [followUpDate, setFollowUpDate] = useState("");
   const [followUpTime, setFollowUpTime] = useState("");
   const [notes, setNotes] = useState("");
@@ -613,6 +615,30 @@ export default function Dialer() {
       setIsLoadingHistory(false);
     }
   }, []);
+
+  // Audio Recording Lifecycle: Start recording when connected, finalize & upload when call ends
+  useEffect(() => {
+    if (callStatus === "connected" && currentCallId) {
+      const stream = plivoWebRTC.getLocalStream();
+      audioRecorder.startRecording(stream, currentCallId).catch((err) => {
+        console.warn("[DIALER] Failed to start audio recorder:", err);
+      });
+    } else if (callStatus === "wrapup" || callStatus === "completed") {
+      if (currentCallId) {
+        audioRecorder.stopAndUpload(currentCallId, callDuration || 0, {
+          lead_id: selectedLead?._id,
+          agent_id: user?.id,
+          outcome: notes ? "disposition_pending" : "answered"
+        }).then((res) => {
+          if (res?.secure_url) {
+            fetchCallHistory();
+          }
+        }).catch((err) => {
+          console.warn("[DIALER] Failed to upload audio recording:", err);
+        });
+      }
+    }
+  }, [callStatus, currentCallId, callDuration, selectedLead, user, notes, fetchCallHistory]);
 
   useEffect(() => {
     fetchLeads();
@@ -1090,6 +1116,15 @@ export default function Dialer() {
       });
 
       if (currentCallId) {
+        // Upload audio recording if not already uploaded
+        audioRecorder.stopAndUpload(currentCallId, callDuration || 0, {
+          lead_id: selectedLead._id,
+          agent_id: user?.id,
+          outcome: status,
+          notes,
+          follow_up_date: followUpDate
+        }).catch(() => {});
+
         await api.post(`/api/calls/${currentCallId}/manual-end`, {
           call_id: currentCallId,
           outcome: status,
@@ -1458,6 +1493,7 @@ export default function Dialer() {
       setRingingDuration(0);
       ringingStartTimeRef.current = null;
       answeredStartTimeRef.current = null;
+      audioRecorder.stopRecording().catch(() => {});
       if (currentCallId) {
         api.post(`/api/calls/${currentCallId}/manual-end`, {
           call_id: currentCallId,
@@ -1473,6 +1509,17 @@ export default function Dialer() {
       wrapUpStartTimeRef.current = Date.now();
       setWrapUpDuration(0);
       if (currentCallId) {
+        audioRecorder.stopAndUpload(currentCallId, callDuration, {
+          lead_id: selectedLead?._id,
+          agent_id: user?.id,
+          outcome: "answered",
+          notes: notes || "Call ended by agent"
+        }).then((res) => {
+          if (res?.secure_url) {
+            fetchCallHistory();
+          }
+        }).catch(() => {});
+
         api.post(`/api/calls/${currentCallId}/manual-end`, {
           call_id: currentCallId,
           outcome: "answered",
@@ -1481,7 +1528,7 @@ export default function Dialer() {
         }).catch((err) => console.warn("Backend end-call notice:", err));
       }
     }
-  }, [callStatus, currentCallId, callDuration, notes]);
+  }, [callStatus, currentCallId, callDuration, notes, selectedLead, user, fetchCallHistory]);
 
   // REAL-TIME CALL LIFECYCLE EVENT TRACKER
   const pushCallTimelineEvent = useCallback((
@@ -1621,6 +1668,11 @@ export default function Dialer() {
       return;
     }
 
+    if (disposition === "call_back" && (!followUpDate || !followUpTime)) {
+      showToast("Please provide both follow-up date and time for Call Back", "warning");
+      return;
+    }
+
     setIsSavingOutcome(true);
     try {
       // Step 1: Save call disposition in backend
@@ -1629,7 +1681,7 @@ export default function Dialer() {
           disposition,
           duration_seconds: callDuration,
           notes,
-          follow_up_date: followUpDate,
+          follow_up_date: followUpDate ? `${followUpDate} ${followUpTime}` : undefined,
           follow_up_time: followUpTime
         });
       }
@@ -2103,107 +2155,25 @@ export default function Dialer() {
 
         {/* Wrap-up Disposition */}
         {callStatus === "wrapup" && (
-          <div className="my-2 p-3.5 bg-slate-50 dark:bg-[#172033] rounded-xl border-2 border-amber-500/60 dark:border-amber-500/40 space-y-3 shadow-md">
-            <div className="flex items-center justify-between pb-2 border-b border-slate-200 dark:border-white/10">
-              <div className="flex items-center gap-1.5">
-                <MessageSquare className="h-4 w-4 text-amber-500" />
-                <p className="text-xs font-black text-slate-900 dark:text-white uppercase tracking-wider">
-                  After-Call Work (Wrap-up)
-                </p>
-              </div>
-              <div className="px-2 py-0.5 rounded-full text-[11px] font-mono font-extrabold bg-amber-50 dark:bg-amber-500/10 text-amber-700 dark:text-amber-400 border border-amber-200 dark:border-amber-500/30">
-                ⏱ {formatTime(wrapUpDuration)}
-              </div>
-            </div>
-
-            <div>
-              <label className="block text-[10px] font-black text-slate-500 dark:text-slate-400 uppercase tracking-wider mb-1.5">
-                Call Disposition <span className="text-rose-500">*</span>
-              </label>
-              <div className="grid grid-cols-3 gap-1.5 mb-2">
-                {[
-                  { val: "interested", label: "Interested", activeCls: "bg-emerald-600 text-white border-emerald-700 shadow-xs" },
-                  { val: "not_interested", label: "Not Interested", activeCls: "bg-rose-600 text-white border-rose-700 shadow-xs" },
-                  { val: "call_back", label: "Call Back", activeCls: "bg-amber-600 text-white border-amber-700 shadow-xs" },
-                  { val: "converted", label: "Converted", activeCls: "bg-blue-600 text-white border-blue-700 shadow-xs" },
-                  { val: "no_answer", label: "No Answer", activeCls: "bg-slate-700 text-white border-slate-800 shadow-xs" },
-                  { val: "dnc", label: "DNC", activeCls: "bg-purple-700 text-white border-purple-800 shadow-xs" }
-                ].map(chip => (
-                  <button
-                    key={chip.val}
-                    type="button"
-                    onClick={() => setDisposition(chip.val)}
-                    className={`h-6.5 px-1 rounded-md text-[10px] font-extrabold border transition-all cursor-pointer text-center truncate ${
-                      disposition === chip.val
-                        ? chip.activeCls
-                        : "bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-300 border-slate-200 dark:border-slate-700 hover:bg-slate-100"
-                    }`}
-                  >
-                    {chip.label}
-                  </button>
-                ))}
-              </div>
-              <CustomSelect
-                value={disposition}
-                onChange={setDisposition}
-                options={DISPOSITION_OPTIONS}
-                placeholder="Select Disposition"
-                triggerClassName="h-8 rounded-lg text-xs dark:bg-slate-800 dark:text-white dark:border-white/10"
-              />
-            </div>
-
-            <div className="grid grid-cols-2 gap-2">
-              <div>
-                <label className="block text-[10px] font-extrabold text-slate-400 uppercase mb-1">
-                  Follow-up Date
-                </label>
-                <input
-                  type="date"
-                  value={followUpDate}
-                  onChange={e => setFollowUpDate(e.target.value)}
-                  className="w-full h-8 px-2 bg-white dark:bg-slate-800 border border-slate-200 dark:border-white/10 rounded-lg text-xs font-semibold text-slate-900 dark:text-white outline-none"
-                />
-              </div>
-              <div>
-                <label className="block text-[10px] font-extrabold text-slate-400 uppercase mb-1">
-                  Follow-up Time
-                </label>
-                <input
-                  type="time"
-                  value={followUpTime}
-                  onChange={e => setFollowUpTime(e.target.value)}
-                  className="w-full h-8 px-2 bg-white dark:bg-slate-800 border border-slate-200 dark:border-white/10 rounded-lg text-xs font-semibold text-slate-900 dark:text-white outline-none"
-                />
-              </div>
-            </div>
-
-            <div>
-              <label className="block text-[10px] font-extrabold text-slate-400 uppercase mb-1">
-                Customer Notes
-              </label>
-              <textarea
-                placeholder="Log customer response..."
-                value={notes}
-                onChange={e => setNotes(e.target.value)}
-                rows={2}
-                className="w-full p-2 bg-white dark:bg-slate-800 border border-slate-200 dark:border-white/10 rounded-lg text-xs font-medium text-slate-900 dark:text-white resize-none outline-none"
-              />
-            </div>
-
-            <button
-              type="button"
-              onClick={handleSaveAndNext}
-              disabled={isSavingOutcome}
-              className="w-full h-9 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-700 hover:to-teal-700 text-white rounded-xl font-black text-xs flex items-center justify-center gap-1.5 shadow-xs cursor-pointer active:scale-95 disabled:opacity-50"
-            >
-              {isSavingOutcome ? (
-                <Loader2 className="h-3.5 w-3.5 animate-spin" />
-              ) : (
-                <Save className="h-3.5 w-3.5" />
-              )}
-              <span>Save &amp; Next Lead →</span>
-            </button>
-          </div>
+          <WrapUpPanel
+            lead={selectedLead}
+            phone={outboundPhone}
+            maskedPhone={maskPhoneNumber(outboundPhone || selectedLead?.phone)}
+            callDuration={callDuration}
+            callDirection={dialerMode}
+            wrapUpDuration={wrapUpDuration}
+            disposition={disposition}
+            setDisposition={setDisposition}
+            followUpDate={followUpDate}
+            setFollowUpDate={setFollowUpDate}
+            followUpTime={followUpTime}
+            setFollowUpTime={setFollowUpTime}
+            notes={notes}
+            setNotes={setNotes}
+            isSavingOutcome={isSavingOutcome}
+            onSaveAndNext={handleSaveAndNext}
+            formatTime={formatTime}
+          />
         )}
       </div>
 
@@ -2911,118 +2881,26 @@ export default function Dialer() {
 
                       {/* WRAP-UP / DISPOSITION INTERFACE */}
                       {callStatus === "wrapup" && (
-                        <div className="my-2 p-4 bg-white dark:bg-[#111827] rounded-2xl border-2 border-amber-500/70 dark:border-amber-500/50 space-y-3.5 shadow-xl animate-in fade-in zoom-in-95 duration-200">
-                          {/* Wrap-up Header & Live Timer */}
-                          <div className="flex items-center justify-between pb-2.5 border-b border-slate-200 dark:border-slate-800">
-                            <div className="flex items-center gap-2">
-                              <div className="h-7 w-7 rounded-lg bg-amber-50 dark:bg-amber-500/15 text-amber-600 dark:text-amber-400 flex items-center justify-center">
-                                <MessageSquare className="h-4 w-4" />
-                              </div>
-                              <div>
-                                <p className="text-xs font-black text-slate-900 dark:text-white uppercase tracking-wider leading-none">
-                                  After-Call Work (Wrap-up)
-                                </p>
-                                <p className="text-[10px] text-slate-400 dark:text-slate-500 font-semibold mt-0.5">
-                                  Select outcome for {selectedLead?.name || "Customer Lead"} ({maskPhoneNumber(outboundPhone || selectedLead?.phone)})
-                                </p>
-                              </div>
-                            </div>
-                            <div className="px-2.5 py-1 rounded-full text-xs font-mono font-black bg-amber-50 dark:bg-amber-500/10 text-amber-700 dark:text-amber-400 border border-amber-200 dark:border-amber-500/30 shrink-0">
-                              ⏱ {formatTime(wrapUpDuration)}
-                            </div>
-                          </div>
-
-                          {/* Quick Select Disposition Pills */}
-                          <div>
-                            <label className="block text-[10px] font-black text-slate-500 dark:text-slate-400 uppercase tracking-wider mb-1.5">
-                              Call Disposition <span className="text-rose-500">*</span>
-                            </label>
-                            <div className="grid grid-cols-3 gap-1.5 mb-2">
-                              {[
-                                { val: "interested", label: "Interested", activeCls: "bg-emerald-600 text-white border-emerald-700 shadow-xs ring-2 ring-emerald-500/30" },
-                                { val: "not_interested", label: "Not Interested", activeCls: "bg-rose-600 text-white border-rose-700 shadow-xs ring-2 ring-rose-500/30" },
-                                { val: "call_back", label: "Call Back", activeCls: "bg-amber-600 text-white border-amber-700 shadow-xs ring-2 ring-amber-500/30" },
-                                { val: "converted", label: "Converted", activeCls: "bg-blue-600 text-white border-blue-700 shadow-xs ring-2 ring-blue-500/30" },
-                                { val: "no_answer", label: "No Answer", activeCls: "bg-slate-700 text-white border-slate-800 shadow-xs ring-2 ring-slate-500/30" },
-                                { val: "dnc", label: "DNC", activeCls: "bg-purple-700 text-white border-purple-800 shadow-xs ring-2 ring-purple-500/30" }
-                              ].map(chip => (
-                                <button
-                                  key={chip.val}
-                                  type="button"
-                                  onClick={() => setDisposition(chip.val)}
-                                  className={`h-7 px-1.5 rounded-lg text-[10.5px] font-extrabold border transition-all duration-150 cursor-pointer text-center truncate ${
-                                    disposition === chip.val
-                                      ? chip.activeCls
-                                      : "bg-slate-50 dark:bg-slate-800/80 text-slate-700 dark:text-slate-300 border-slate-200 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-700"
-                                  }`}
-                                >
-                                  {chip.label}
-                                </button>
-                              ))}
-                            </div>
-                            <CustomSelect
-                              value={disposition}
-                              onChange={setDisposition}
-                              options={DISPOSITION_OPTIONS}
-                              placeholder="Or choose from all dispositions..."
-                              triggerClassName="h-9 rounded-lg text-xs dark:bg-slate-800 dark:text-white dark:border-slate-700 font-bold"
-                            />
-                          </div>
-
-                          {/* Follow-up Date & Time */}
-                          <div className="grid grid-cols-2 gap-2">
-                            <div>
-                              <label className="block text-[10px] font-extrabold text-slate-400 uppercase mb-1">
-                                Follow-up Date
-                              </label>
-                              <input
-                                type="date"
-                                value={followUpDate}
-                                onChange={e => setFollowUpDate(e.target.value)}
-                                className="w-full h-8 px-2 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg text-xs font-semibold text-slate-900 dark:text-white outline-none focus:border-amber-500 transition"
-                              />
-                            </div>
-                            <div>
-                              <label className="block text-[10px] font-extrabold text-slate-400 uppercase mb-1">
-                                Follow-up Time
-                              </label>
-                              <input
-                                type="time"
-                                value={followUpTime}
-                                onChange={e => setFollowUpTime(e.target.value)}
-                                className="w-full h-8 px-2 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg text-xs font-semibold text-slate-900 dark:text-white outline-none focus:border-amber-500 transition"
-                              />
-                            </div>
-                          </div>
-
-                          {/* Customer Notes */}
-                          <div>
-                            <label className="block text-[10px] font-extrabold text-slate-400 uppercase mb-1">
-                              Customer Notes
-                            </label>
-                            <textarea
-                              placeholder="Log customer response or next steps..."
-                              value={notes}
-                              onChange={e => setNotes(e.target.value)}
-                              rows={2}
-                              className="w-full p-2.5 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg text-xs font-medium text-slate-900 dark:text-white resize-none outline-none focus:border-amber-500 transition"
-                            />
-                          </div>
-
-                          {/* Save Disposition & Next Lead Button */}
-                          <button
-                            type="button"
-                            onClick={handleSaveAndNext}
-                            disabled={isSavingOutcome}
-                            className="w-full h-11 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl font-extrabold text-xs flex items-center justify-center gap-2 shadow-md shadow-emerald-600/20 cursor-pointer active:scale-95 disabled:opacity-50 transition"
-                          >
-                            {isSavingOutcome ? (
-                              <Loader2 className="h-4 w-4 animate-spin" />
-                            ) : (
-                              <Save className="h-4 w-4" />
-                            )}
-                            <span>Save Disposition &amp; Next Lead →</span>
-                          </button>
+                        <div className="my-2 animate-in fade-in zoom-in-95 duration-200">
+                          <WrapUpPanel
+                            lead={selectedLead}
+                            phone={outboundPhone}
+                            maskedPhone={maskPhoneNumber(outboundPhone || selectedLead?.phone)}
+                            callDuration={callDuration}
+                            callDirection={dialerMode}
+                            wrapUpDuration={wrapUpDuration}
+                            disposition={disposition}
+                            setDisposition={setDisposition}
+                            followUpDate={followUpDate}
+                            setFollowUpDate={setFollowUpDate}
+                            followUpTime={followUpTime}
+                            setFollowUpTime={setFollowUpTime}
+                            notes={notes}
+                            setNotes={setNotes}
+                            isSavingOutcome={isSavingOutcome}
+                            onSaveAndNext={handleSaveAndNext}
+                            formatTime={formatTime}
+                          />
                         </div>
                       )}
                     </div>

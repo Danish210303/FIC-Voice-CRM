@@ -55,6 +55,7 @@ export default function LeadActionSlideOver({
   const [dispNotes, setDispNotes] = useState<string>("");
   const [followUpDate, setFollowUpDate] = useState<string>("");
   const [playingAudioId, setPlayingAudioId] = useState<string | null>(null);
+  const [audioErrorMap, setAudioErrorMap] = useState<Record<string, boolean>>({});
   const [copiedId, setCopiedId] = useState(false);
 
   useEffect(() => {
@@ -444,34 +445,35 @@ export default function LeadActionSlideOver({
                       </div>
 
                       {(() => {
-                        const recSource = call.recording_url || call.recording_file || call.secure_url;
+                        const recSource = call.secure_url || call.recording_url || call.recording_file;
                         const token = getToken() || localStorage.getItem("access_token");
                         const tokenQuery = token ? `?token=${encodeURIComponent(token)}` : "";
                         const base = getBaseUrl();
                         let finalAudioUrl: string | null = null;
 
-                        if (recSource) {
+                        if (recSource && typeof recSource === "string") {
                           if (recSource.startsWith("http://") || recSource.startsWith("https://")) {
                             finalAudioUrl = recSource;
                           } else if (recSource.startsWith("/api/")) {
                             finalAudioUrl = `${base}${recSource}${tokenQuery}`;
-                          } else {
+                          } else if (recSource.endsWith(".wav") || recSource.endsWith(".mp3") || recSource.endsWith(".ogg") || recSource.endsWith(".webm") || recSource.startsWith("rec_")) {
                             finalAudioUrl = `${base}/api/recordings/${call._id || call.id}/stream${tokenQuery}`;
                           }
-                        } else if (call._id || call.id) {
+                        } else if ((call._id || call.id) && call.recording_status === "saved") {
                           finalAudioUrl = `${base}/api/recordings/${call._id || call.id}/stream${tokenQuery}`;
                         }
 
-                        const isPlaying = playingAudioId === (call._id || call.id);
+                        const audioId = call._id || call.id;
+                        const isPlaying = playingAudioId === audioId;
+                        const hasError = audioId ? audioErrorMap[audioId] : false;
 
                         return (
                           <>
                             <div className="flex items-center justify-between text-[11px] font-mono text-slate-600 dark:text-slate-400 pt-1 border-t border-slate-200/50 dark:border-white/5">
                               <span>Duration: <strong>{formattedDur}</strong></span>
-                              {finalAudioUrl ? (
+                              {finalAudioUrl && !hasError ? (
                                 <button
                                   onClick={() => {
-                                    const audioId = call._id || call.id;
                                     setPlayingAudioId(isPlaying ? null : audioId);
                                   }}
                                   className="flex items-center gap-1 text-[11px] font-bold text-blue-600 dark:text-blue-400 hover:underline cursor-pointer"
@@ -480,13 +482,26 @@ export default function LeadActionSlideOver({
                                   <span>{isPlaying ? "Hide Recording" : "Play Recording"}</span>
                                 </button>
                               ) : (
-                                <span className="text-[10px] text-slate-400">Recording N/A</span>
+                                <span className="text-[10px] text-slate-400">
+                                  {hasError ? "Recording unavailable" : "Recording N/A"}
+                                </span>
                               )}
                             </div>
 
-                            {isPlaying && finalAudioUrl && (
+                            {isPlaying && finalAudioUrl && !hasError && (
                               <div className="pt-2">
-                                <audio controls src={finalAudioUrl} className="w-full h-8" autoPlay />
+                                <audio
+                                  controls
+                                  src={finalAudioUrl}
+                                  className="w-full h-8"
+                                  autoPlay
+                                  onError={() => {
+                                    console.warn(`[LEAD SLIDEOVER] Audio load failed for call ${audioId}`);
+                                    if (audioId) {
+                                      setAudioErrorMap((prev) => ({ ...prev, [audioId]: true }));
+                                    }
+                                  }}
+                                />
                               </div>
                             )}
                           </>

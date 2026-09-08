@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from typing import Optional, List
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status, BackgroundTasks, UploadFile, File, Form
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 from bson import ObjectId
@@ -151,7 +151,7 @@ async def download_and_store_recording_task(recording_id: str, remote_url: str, 
             audio_data=audio_bytes,
             duration_seconds=0,
             extension=ext,
-            type_access="authenticated"
+            type_access="upload"
         )
 
         completed_iso = utcnow().isoformat()
@@ -235,6 +235,202 @@ async def download_and_store_recording_task(recording_id: str, remote_url: str, 
             "updated_at": failed_iso
         }
         await ws_manager.broadcast_global(ws_event)
+
+
+# ─── 0. DIRECT BROWSER AUDIO RECORDING UPLOAD ─────────────────────────────────
+@router.post("/upload", dependencies=[Depends(require_roles(Role.ADMIN, Role.TEAM_LEADER, Role.AGENT))])
+async def upload_call_recording(
+    file: UploadFile = File(...),
+    call_id: str = Form(...),
+    duration_seconds: int = Form(0),
+    lead_id: Optional[str] = Form(None),
+    agent_id: Optional[str] = Form(None),
+    outcome: Optional[str] = Form("completed"),
+    notes: Optional[str] = Form(None),
+    ai_summary: Optional[str] = Form(None),
+    transcript: Optional[str] = Form(None),
+    user: dict = Depends(get_current_user)
+):
+    """
+    Direct audio upload endpoint for browser microphone MediaRecorder audio Blobs.
+    Receives full audio Blob (webm/ogg/wav/mp3/mp4), uploads to Cloudinary with resource_type='video' and type='upload',
+    validates secure_url and public_id, and indexes the recording in MongoDB before returning the secure Cloudinary URL.
+    """
+    logger.info(f"[RECORDING] Received audio upload request for call {call_id} by user {user.get('id') or user.get('_id')}")
+
+    if not file:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No audio file provided.")
+
+    try:
+        audio_bytes = await file.read()
+    except Exception as e:
+        logger.error(f"[RECORDING ERROR] Failed to read audio upload bytes: {e}")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Failed to read uploaded audio stream.")
+
+    file_size = len(audio_bytes)
+    if file_size == 0:
+        logger.error(f"[RECORDING ERROR] Uploaded audio file is empty (0 bytes) for call {call_id}")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Uploaded audio file contains no data (0 bytes).")
+
+    # Content type & extension determination
+    content_type = (file.content_type or "").lower()
+    filename_orig = file.filename or ""
+    
+    ext = "webm"
+    if "wav" in content_type or filename_orig.endswith(".wav"):
+        ext = "wav"
+    elif "ogg" in content_type or filename_orig.endswith(".ogg") or filename_orig.endswith(".opus"):
+        ext = "ogg"
+    elif "mp3" in content_type or "mpeg" in content_type or filename_orig.endswith(".mp3"):
+        ext = "mp3"
+    elif "mp4" in content_type or "m4a" in content_type or filename_orig.endswith(".mp4") or filename_orig.endswith(".m4a"):
+        ext = "mp4"
+    elif "webm" in content_type or filename_orig.endswith(".webm"):
+        ext = "webm"
+
+    logger.info(f"[RECORDING] Recording stopped for call {call_id} | Blob size: {file_size} bytes | MIME type: {content_type or f'audio/{ext}'} | Target format: {ext}")
+    logger.info(f"[CLOUDINARY] Upload started for call {call_id}...")
+
+    # Upload to Cloudinary under resource_type="video" and type="upload"
+    try:
+        upload_meta = await storage_service.upload_recording_to_cloudinary(
+            call_id=str(call_id),
+            audio_data=audio_bytes,
+            duration_seconds=duration_seconds,
+            extension=ext,
+            type_access="upload"
+        )
+    except Exception as up_err:
+        logger.error(f"[CLOUDINARY ERROR] Cloudinary upload execution failure for call {call_id}: {up_err}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to upload audio recording to Cloudinary: {str(up_err)}"
+        )
+
+    secure_url = upload_meta.get("secure_url")
+    public_id = upload_meta.get("public_id")
+
+    if not secure_url or not public_id:
+        logger.error(f"[CLOUDINARY ERROR] Invalid upload response for call {call_id}: missing secure_url or public_id")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Cloudinary upload completed without returning a valid secure_url or public_id."
+        )
+
+    logger.info(f"[CLOUDINARY SUCCESS] Cloudinary upload completed for call {call_id}: public_id={public_id}, secure_url={secure_url}")
+
+    # Lookup call / lead / agent metadata for complete indexing
+    now_iso = utcnow().isoformat()
+    uid = str(user.get("id") or user.get("_id"))
+    lead_obj = None
+    if lead_id and ObjectId.is_valid(lead_id):
+        lead_obj = await leads_col.find_one({"_id": ObjectId(lead_id)})
+
+    call_obj = await calls_col.find_one({"_id": ObjectId(call_id)} if ObjectId.is_valid(call_id) else {"id": str(call_id)})
+    if call_obj and not lead_obj and call_obj.get("lead_id"):
+        lid = str(call_obj["lead_id"])
+        if ObjectId.is_valid(lid):
+            lead_obj = await leads_col.find_one({"_id": ObjectId(lid)})
+
+    customer_name = (lead_obj.get("name") if lead_obj else None) or (call_obj.get("lead_name") if call_obj else "Customer")
+    phone_num = (lead_obj.get("phone") if lead_obj else None) or (call_obj.get("phone") if call_obj else "")
+    agent_name = user.get("name") or (call_obj.get("agent_name") if call_obj else "Agent")
+    pool_id_val = (lead_obj.get("pool_id") if lead_obj else None) or (call_obj.get("pool_id") if call_obj else None)
+
+    rec_doc = {
+        "call_id": str(call_id),
+        "lead_id": str(lead_id) if lead_id else (str(call_obj.get("lead_id")) if call_obj and call_obj.get("lead_id") else None),
+        "customer_name": customer_name,
+        "phone_number": phone_num,
+        "agent_id": str(agent_id or uid),
+        "agent_name": agent_name,
+        "pool_id": pool_id_val,
+        "status": "READY",
+        "storage_provider": upload_meta.get("storage_provider", "cloudinary"),
+        "public_id": public_id,
+        "secure_url": secure_url,
+        "duration": duration_seconds or upload_meta.get("duration", 0),
+        "duration_seconds": duration_seconds or upload_meta.get("duration", 0),
+        "format": upload_meta.get("format", ext),
+        "mime_type": content_type or f"audio/{ext}",
+        "bytes": file_size,
+        "file_size_bytes": file_size,
+        "storage_path": upload_meta.get("storage_path"),
+        "filename": upload_meta.get("filename"),
+        "checksum_sha256": upload_meta.get("checksum_sha256"),
+        "call_end_time": now_iso,
+        "call_outcome": outcome or "completed",
+        "notes": notes or (call_obj.get("notes") if call_obj else None),
+        "ai_summary": ai_summary or (call_obj.get("ai_summary") if call_obj else None),
+        "transcript": transcript or (call_obj.get("transcript") if call_obj else None),
+        "consent_status": "consent_recorded",
+        "retry_count": 0,
+        "error_message": None,
+        "upload_started_at": now_iso,
+        "upload_completed_at": now_iso,
+        "processed_at": now_iso,
+        "updated_at": now_iso
+    }
+
+    # Upsert recording document
+    existing_rec = await recordings_col.find_one({"call_id": str(call_id)})
+    if existing_rec:
+        await recordings_col.update_one({"_id": existing_rec["_id"]}, {"$set": rec_doc})
+        rec_id = str(existing_rec["_id"])
+    else:
+        rec_doc["created_at"] = now_iso
+        rec_insert = await recordings_col.insert_one(rec_doc)
+        rec_id = str(rec_insert.inserted_id)
+
+    # Update calls collection record with Cloudinary secure_url and public_id
+    await calls_col.update_one(
+        {"_id": ObjectId(call_id)} if ObjectId.is_valid(call_id) else {"id": str(call_id)},
+        {"$set": {
+            "recording_id": rec_id,
+            "recording_status": "saved",
+            "public_id": public_id,
+            "secure_url": secure_url,
+            "recording_url": secure_url,
+            "recording_file": upload_meta.get("filename"),
+            "audio_duration_seconds": duration_seconds or upload_meta.get("duration", 0),
+            "updated_at": now_iso
+        }}
+    )
+
+    logger.info(f"[DATABASE] database save completed for call {call_id}: recording_id={rec_id}, public_id={public_id}, secure_url={secure_url}")
+
+    # Real-time WebSocket event
+    ws_event = {
+        "event": "recording.status_changed",
+        "type": "recording_status_updated",
+        "recording_id": rec_id,
+        "call_id": str(call_id),
+        "status": "READY",
+        "data": {
+            "id": rec_id,
+            "call_id": str(call_id),
+            "status": "READY",
+            "public_id": public_id,
+            "secure_url": secure_url,
+            "filename": upload_meta.get("filename"),
+            "file_size_bytes": file_size,
+            "duration": duration_seconds,
+            "updated_at": now_iso
+        }
+    }
+    await ws_manager.broadcast_global(ws_event)
+
+    return {
+        "status": "READY",
+        "recording_id": rec_id,
+        "call_id": str(call_id),
+        "public_id": public_id,
+        "secure_url": secure_url,
+        "filename": upload_meta.get("filename"),
+        "file_size_bytes": file_size,
+        "duration": duration_seconds,
+        "storage_provider": "cloudinary"
+    }
 
 
 # ─── 1. LIST & SEARCH RECORDINGS ──────────────────────────────────────────────
@@ -771,7 +967,7 @@ async def handle_call_recording_completed(
             audio_data=audio_bytes,
             duration_seconds=duration_seconds,
             extension="wav",
-            type_access="authenticated"
+            type_access="upload"
         )
 
         completed_iso = utcnow().isoformat()

@@ -807,6 +807,14 @@ class PlivoWebRTCService {
     }
   }
 
+  public getLocalStream(): MediaStream | null {
+    return this.localStream;
+  }
+
+  public getRemoteStream(): MediaStream | null {
+    return this.remoteStream;
+  }
+
   private setCallState(state: WebRTCCallState) {
     this.callState = state;
     this.notifyStateChange();

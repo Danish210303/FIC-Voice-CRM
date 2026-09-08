@@ -19,18 +19,23 @@ try:
     import cloudinary.uploader
     import cloudinary.utils
 
-    if settings.CLOUDINARY_URL:
-        cloudinary.config(cloudinary_url=settings.CLOUDINARY_URL)
-    elif settings.CLOUDINARY_API_KEY and settings.CLOUDINARY_API_SECRET:
+    c_url = (settings.CLOUDINARY_URL or os.getenv("CLOUDINARY_URL", "")).strip().replace("\r", "").replace("\n", "").replace(" ", "").strip('"\'')
+    c_name = (settings.CLOUDINARY_CLOUD_NAME or os.getenv("CLOUDINARY_CLOUD_NAME", "")).strip().strip('"\'')
+    c_key = (settings.CLOUDINARY_API_KEY or os.getenv("CLOUDINARY_API_KEY", "")).strip().strip('"\'')
+    c_sec = (settings.CLOUDINARY_API_SECRET or os.getenv("CLOUDINARY_API_SECRET", "")).strip().strip('"\'')
+
+    if c_url and c_url.startswith("cloudinary://"):
+        cloudinary.config(cloudinary_url=c_url, secure=True)
+    elif c_key and c_sec and c_name:
         cloudinary.config(
-            cloud_name=settings.CLOUDINARY_CLOUD_NAME,
-            api_key=settings.CLOUDINARY_API_KEY,
-            api_secret=settings.CLOUDINARY_API_SECRET,
+            cloud_name=c_name,
+            api_key=c_key,
+            api_secret=c_sec,
             secure=True
         )
-    else:
+    elif c_name:
         cloudinary.config(
-            cloud_name=settings.CLOUDINARY_CLOUD_NAME or "forge-crm",
+            cloud_name=c_name,
             secure=True
         )
     CLOUDINARY_AVAILABLE = True
@@ -87,10 +92,11 @@ class RecordingStorageService:
         audio_data: bytes | str | Path,
         duration_seconds: int = 0,
         extension: str = "wav",
-        type_access: str = "authenticated"
+        type_access: str = "upload"
     ) -> Dict[str, Any]:
         """
         Uploads completed voice recording to Cloudinary with resource_type='video'.
+        Uses type='upload' by default for seamless, public HTTPS HTML5 audio playback and seekable range streaming.
         Falls back seamlessly to local object storage if Cloudinary is offline or credentials are unset.
         """
         timestamp = int(datetime.utcnow().timestamp())
@@ -111,12 +117,22 @@ class RecordingStorageService:
             file_size = len(audio_bytes)
             sha256 = hashlib.sha256(audio_bytes).hexdigest()
 
+        if file_size == 0:
+            raise ValueError(f"Recording audio for call {call_id} is empty (0 bytes).")
+
+        clean_ext = extension.lstrip(".").lower()
+        mime_type = f"audio/{clean_ext}" if clean_ext not in ["mp3", "webm", "ogg", "wav"] else (
+            "audio/mpeg" if clean_ext == "mp3" else f"audio/{clean_ext}"
+        )
+
+        logger.info(f"[RECORDING] Processing audio recording for call {call_id} | Size: {file_size} bytes | Format: {clean_ext} | MIME: {mime_type}")
+
         # Save local disk backup first for fast range-streaming and redundancy
-        local_filename, local_path, _, _ = await self.save_audio_bytes(call_id, audio_bytes, extension=extension)
+        local_filename, local_path, _, _ = await self.save_audio_bytes(call_id, audio_bytes, extension=clean_ext)
 
         if self.is_cloudinary_configured():
             try:
-                logger.info(f"[CLOUDINARY] Uploading call recording for call {call_id} (public_id: {public_id}, resource_type: video)...")
+                logger.info(f"[CLOUDINARY] Upload started for call {call_id} (public_id: {public_id}, resource_type: video, type: {type_access})...")
                 upload_res = cloudinary.uploader.upload(
                     io.BytesIO(audio_bytes),
                     resource_type="video",
@@ -124,15 +140,17 @@ class RecordingStorageService:
                     type=type_access,
                     overwrite=True,
                     tags=["forge_crm", "call_recording", f"call_{call_id}"],
-                    format=extension.lstrip(".")
+                    format=clean_ext
                 )
-                logger.info(f"[CLOUDINARY SUCCESS] Uploaded {public_id} -> {upload_res.get('secure_url')}")
+                secure_url = upload_res.get("secure_url")
+                cl_public_id = upload_res.get("public_id") or public_id
+                logger.info(f"[CLOUDINARY SUCCESS] Upload completed for call {call_id}: public_id={cl_public_id}, secure_url={secure_url}")
                 return {
                     "storage_provider": "cloudinary",
-                    "public_id": upload_res.get("public_id") or public_id,
-                    "secure_url": upload_res.get("secure_url"),
+                    "public_id": cl_public_id,
+                    "secure_url": secure_url,
                     "duration": upload_res.get("duration") or duration_seconds,
-                    "format": upload_res.get("format") or extension.lstrip("."),
+                    "format": upload_res.get("format") or clean_ext,
                     "bytes": upload_res.get("bytes") or file_size,
                     "file_size_bytes": upload_res.get("bytes") or file_size,
                     "checksum_sha256": sha256,
@@ -152,7 +170,7 @@ class RecordingStorageService:
             "public_id": public_id,
             "secure_url": f"/api/recordings/{call_id}/stream",
             "duration": duration_seconds,
-            "format": extension.lstrip("."),
+            "format": clean_ext,
             "bytes": file_size,
             "file_size_bytes": file_size,
             "checksum_sha256": sha256,

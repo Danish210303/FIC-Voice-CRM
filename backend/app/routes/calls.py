@@ -2858,7 +2858,20 @@ async def end_manual_call(call_id: str, payload: CallEnd, user: dict = Depends(g
         "outcome": payload.outcome or "wrap_up"
     })
 
-    return {"status": "wrap_up", "call_id": call_id, "wrap_up_started_at": now_iso, "talk_seconds": talk_sec}
+    # Fetch updated call details for full response
+    updated_call = await calls_col.find_one({"_id": call["_id"]})
+    secure_url = updated_call.get("secure_url") if updated_call else call.get("secure_url")
+    public_id = updated_call.get("public_id") if updated_call else call.get("public_id")
+
+    return {
+        "status": "wrap_up",
+        "call_id": call_id,
+        "wrap_up_started_at": now_iso,
+        "talk_seconds": talk_sec,
+        "secure_url": secure_url,
+        "public_id": public_id,
+        "recording_file": updated_call.get("recording_file") if updated_call else None
+    }
 
 
 @router.get("/active", dependencies=[Depends(require_roles(Role.ADMIN, Role.TEAM_LEADER, Role.AGENT))])

@@ -17,7 +17,7 @@ export const getBaseUrl = (): string => {
   if (envUrl && typeof envUrl === "string" && envUrl.trim() !== "") {
     return envUrl.trim().replace(/\/+$/, "");
   }
-  return "http://localhost:8000";
+  return RENDER_PROD_URL;
 };
 
 export const setCustomApiUrl = (newUrl: string | null) => {
