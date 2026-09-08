@@ -23,6 +23,7 @@ class AudioRecorderService {
   private uploadLocks: Set<string> = new Set();
   private completedUploads: Map<string, RecordingResult> = new Map();
   private activeUploadPromises: Map<string, Promise<RecordingResult | null>> = new Map();
+  private audioContext: AudioContext | null = null;
 
   /**
    * Determine the best supported audio MIME type across browsers.
@@ -63,7 +64,7 @@ class AudioRecorderService {
   }
 
   /**
-   * Mix local agent audio and remote customer audio into a single composite MediaStream.
+   * Mix local agent audio and remote customer audio into a single high-fidelity composite MediaStream.
    */
   private createMixedAudioStream(localStream?: MediaStream | null, remoteStream?: MediaStream | null): MediaStream | null {
     const hasLocal = localStream && localStream.getAudioTracks().length > 0;
@@ -73,7 +74,12 @@ class AudioRecorderService {
       try {
         const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
         if (AudioContextClass) {
-          const audioCtx = new AudioContextClass();
+          const audioCtx = new AudioContextClass({ sampleRate: 48000 });
+          if (audioCtx.state === "suspended") {
+            audioCtx.resume().catch((e) => console.warn("[AUDIO RECORDER] AudioContext resume warning:", e));
+          }
+          this.audioContext = audioCtx;
+
           const destination = audioCtx.createMediaStreamDestination();
 
           const localSource = audioCtx.createMediaStreamSource(localStream);
@@ -82,7 +88,7 @@ class AudioRecorderService {
           localSource.connect(destination);
           remoteSource.connect(destination);
 
-          console.log("[AUDIO RECORDER] Successfully mixed local microphone and customer remote audio streams.");
+          console.log("[AUDIO RECORDER] High-fidelity mixed local microphone and customer remote audio stream active.");
           return destination.stream;
         }
       } catch (mixErr) {
@@ -127,6 +133,8 @@ class AudioRecorderService {
               echoCancellation: true,
               noiseSuppression: true,
               autoGainControl: true,
+              channelCount: 1,
+              sampleRate: 48000,
             },
             video: false,
           });
@@ -142,7 +150,10 @@ class AudioRecorderService {
       this.activeStream = targetStream;
       this.mimeType = this.getSupportedMimeType();
 
-      const options: MediaRecorderOptions = this.mimeType ? { mimeType: this.mimeType } : {};
+      const options: MediaRecorderOptions = {
+        ...(this.mimeType ? { mimeType: this.mimeType } : {}),
+        audioBitsPerSecond: 128000, // 128 kbps crystal clear voice quality
+      };
       this.mediaRecorder = new MediaRecorder(targetStream, options);
 
       this.mediaRecorder.ondataavailable = (event: BlobEvent) => {
@@ -160,7 +171,7 @@ class AudioRecorderService {
       this.mediaRecorder.start(250);
       this.isRecording = true;
 
-      console.log(`[RECORDING] started: true | callId: ${this.currentCallId} | mimeType: ${this.mimeType || "default"}`);
+      console.log(`[RECORDING] started: true | callId: ${this.currentCallId} | mimeType: ${this.mimeType || "default"} | bitrate: 128kbps`);
       return true;
     } catch (err) {
       console.error(`[AUDIO RECORDER ERROR] Failed to start MediaRecorder for call ${this.currentCallId}:`, err);
@@ -176,6 +187,13 @@ class AudioRecorderService {
    */
   public stopRecording(): Promise<{ blob: Blob; mimeType: string; extension: string } | null> {
     return new Promise((resolve) => {
+      if (this.audioContext && this.audioContext.state !== "closed") {
+        try {
+          this.audioContext.close();
+        } catch (_) {}
+        this.audioContext = null;
+      }
+
       if (!this.mediaRecorder || this.mediaRecorder.state === "inactive" || !this.isRecording) {
         this.isRecording = false;
         if (this.recordedChunks.length > 0) {

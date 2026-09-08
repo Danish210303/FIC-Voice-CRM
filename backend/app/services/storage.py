@@ -120,7 +120,19 @@ class RecordingStorageService:
         if file_size == 0:
             raise ValueError(f"Recording audio for call {call_id} is empty (0 bytes).")
 
+        # Accurate audio magic-byte format detection
         clean_ext = extension.lstrip(".").lower()
+        if audio_bytes.startswith(b"\x1aE\xdf\xa3"):
+            clean_ext = "webm"
+        elif audio_bytes.startswith(b"OggS"):
+            clean_ext = "ogg"
+        elif audio_bytes.startswith(b"RIFF") and len(audio_bytes) > 12 and audio_bytes[8:12] == b"WAVE":
+            clean_ext = "wav"
+        elif audio_bytes.startswith(b"ID3") or (len(audio_bytes) > 2 and audio_bytes[:2] == b"\xff\xfb"):
+            clean_ext = "mp3"
+        elif len(audio_bytes) > 8 and audio_bytes[4:8] == b"ftyp":
+            clean_ext = "mp4"
+
         mime_type = f"audio/{clean_ext}" if clean_ext not in ["mp3", "webm", "ogg", "wav"] else (
             "audio/mpeg" if clean_ext == "mp3" else f"audio/{clean_ext}"
         )
@@ -132,7 +144,7 @@ class RecordingStorageService:
 
         if self.is_cloudinary_configured():
             try:
-                logger.info(f"[CLOUDINARY] Upload started for call {call_id} (public_id: {public_id}, resource_type: video, type: {type_access})...")
+                logger.info(f"[CLOUDINARY] Upload started for call {call_id} (public_id: {public_id}, resource_type: video, type: {type_access}, format: {clean_ext})...")
                 upload_res = cloudinary.uploader.upload(
                     io.BytesIO(audio_bytes),
                     resource_type="video",
