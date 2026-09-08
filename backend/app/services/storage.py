@@ -144,15 +144,19 @@ class RecordingStorageService:
                 )
                 secure_url = upload_res.get("secure_url")
                 cl_public_id = upload_res.get("public_id") or public_id
-                logger.info(f"[CLOUDINARY SUCCESS] Upload completed for call {call_id}: public_id={cl_public_id}, secure_url={secure_url}")
+                format_val = upload_res.get("format") or clean_ext
+                bytes_val = upload_res.get("bytes") or file_size
+                logger.info(
+                    f"[CLOUDINARY] publicId: {cl_public_id} | secureUrl: {secure_url} | bytes: {bytes_val} | format: {format_val} | resourceType: video"
+                )
                 return {
                     "storage_provider": "cloudinary",
                     "public_id": cl_public_id,
                     "secure_url": secure_url,
                     "duration": upload_res.get("duration") or duration_seconds,
-                    "format": upload_res.get("format") or clean_ext,
-                    "bytes": upload_res.get("bytes") or file_size,
-                    "file_size_bytes": upload_res.get("bytes") or file_size,
+                    "format": format_val,
+                    "bytes": bytes_val,
+                    "file_size_bytes": bytes_val,
                     "checksum_sha256": sha256,
                     "filename": local_filename,
                     "storage_path": local_path,

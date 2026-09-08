@@ -17,6 +17,7 @@ from app.core.database import (
 from app.core.utils import utcnow, oid_str
 from app.core.deps import get_current_user
 from app.services.ws_manager import ws_manager
+from app.services.attendance_service import get_local_date_str, get_local_now
 
 logger = logging.getLogger("uvicorn.error")
 
@@ -102,13 +103,13 @@ async def get_supervisor_assigned_pool_ids(current_user: dict) -> list[str] | No
 
 # State machine allowed transition rules
 ALLOWED_TRANSITIONS = {
-    "offline": ["ready"],
-    "ready": ["paused", "break", "ringing", "offline"],
-    "paused": ["ready"],
-    "break": ["ready"],
-    "ringing": ["in_call", "ready", "wrap_up"],
-    "in_call": ["wrap_up"],
-    "wrap_up": ["ready"]
+    "offline": ["ready", "offline"],
+    "ready": ["ready", "paused", "break", "ringing", "in_call", "offline"],
+    "paused": ["paused", "ready", "offline"],
+    "break": ["break", "ready", "offline"],
+    "ringing": ["ringing", "in_call", "ready", "wrap_up", "offline"],
+    "in_call": ["in_call", "wrap_up", "ready", "offline"],
+    "wrap_up": ["wrap_up", "ready", "offline"]
 }
 
 
@@ -212,7 +213,7 @@ async def record_presence_change(
         return None
 
     uid_str = str(user["_id"])
-    shift_date = now.strftime("%Y-%m-%d")
+    shift_date = get_local_date_str(now)
     user_shift_date = user.get("shift_date")
     
     # 1. Get current states
@@ -224,20 +225,17 @@ async def record_presence_change(
     today_att = await attendance_col.find_one({"agent_id": uid_str, "date": shift_date})
     has_checked_in = bool(today_att and today_att.get("check_in_time") and today_att.get("status") not in ("NOT_CHECKED_IN", "ABSENT"))
 
-    if new_status in ("ready", "paused", "in_call", "ringing", "wrap_up") and not has_checked_in and source not in ("session_start", "check_in"):
+    if new_status in ("ready", "paused", "in_call", "ringing", "wrap_up") and not has_checked_in and source not in ("session_start", "check_in", "attendance_service"):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Agent has not checked in today.")
 
     # Prevent identical transitions (Idempotency)
     if current_status == new_status and user_shift_date == shift_date:
         logger.info(f"[PRESENCE DUP] Redundant status update '{new_status}' for user {user_id}")
-        # Just return the current state
-        # In the interest of brevity for this replacement script, I'll fetch and return current.
-        # We will build a unified get_current_session helper to return this.
         pass
 
     # Validate Transitions
     allowed_next = ALLOWED_TRANSITIONS.get(current_status, ["ready", "paused", "offline"])
-    if new_status not in allowed_next:
+    if new_status != current_status and new_status not in allowed_next and user_shift_date == shift_date and not (force_offline and new_status == "offline"):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Invalid status transition from '{map_status_to_enum(current_status)}' to '{map_status_to_enum(new_status)}'."
@@ -254,22 +252,26 @@ async def record_presence_change(
     except Exception:
         elapsed_seconds = 0
 
-    # Accumulate durations based on the exiting state
+    # Accumulate durations based on the exiting state ONLY if in same shift date
     inc_updates = {}
-    if current_status == "ready":
-        inc_updates["total_ready_seconds"] = elapsed_seconds
-    elif current_status == "paused":
-        inc_updates["total_pause_seconds"] = elapsed_seconds
-        inc_updates["total_break_seconds"] = elapsed_seconds
-    elif current_status == "ringing":
-        inc_updates["total_ringing_seconds"] = elapsed_seconds
-        inc_updates["ringing_seconds"] = elapsed_seconds
-    elif current_status in ("in_call", "calling"):
-        inc_updates["total_talk_seconds"] = elapsed_seconds
-        inc_updates["talk_seconds"] = elapsed_seconds
-    elif current_status == "wrap_up":
-        inc_updates["total_wrapup_seconds"] = elapsed_seconds
-        inc_updates["dispose_seconds"] = elapsed_seconds
+    if user_shift_date == shift_date:
+        if current_status == "ready":
+            inc_updates["total_ready_seconds"] = elapsed_seconds
+            inc_updates["ready_seconds"] = elapsed_seconds
+            inc_updates["waiting_seconds"] = elapsed_seconds
+        elif current_status == "paused":
+            inc_updates["total_pause_seconds"] = elapsed_seconds
+            inc_updates["total_break_seconds"] = elapsed_seconds
+            inc_updates["paused_seconds"] = elapsed_seconds
+        elif current_status == "ringing":
+            inc_updates["total_ringing_seconds"] = elapsed_seconds
+            inc_updates["ringing_seconds"] = elapsed_seconds
+        elif current_status in ("in_call", "calling"):
+            inc_updates["total_talk_seconds"] = elapsed_seconds
+            inc_updates["talk_seconds"] = elapsed_seconds
+        elif current_status == "wrap_up":
+            inc_updates["total_wrapup_seconds"] = elapsed_seconds
+            inc_updates["dispose_seconds"] = elapsed_seconds
 
     # Handle breaks specifically
     break_logs = list(user.get("break_logs") or []) if user_shift_date == shift_date else []
@@ -313,12 +315,45 @@ async def record_presence_change(
         "break_logs": break_logs,
         "updated_at": now_iso
     }
+
+    # If new shift day, reset all daily telemetry counters
+    if user_shift_date != shift_date:
+        set_updates.update({
+            "total_ready_seconds": 0,
+            "ready_seconds": 0,
+            "waiting_seconds": 0,
+            "waiting_started_at": now_iso if new_status == "ready" else None,
+            "total_talk_seconds": 0,
+            "talk_seconds": 0,
+            "total_ringing_seconds": 0,
+            "ringing_seconds": 0,
+            "total_wrapup_seconds": 0,
+            "dispose_seconds": 0,
+            "total_pause_seconds": 0,
+            "total_break_seconds": 0,
+            "paused_seconds": 0,
+            "gross_seconds": 0,
+            "total_login_seconds": 0,
+            "total_calls_handled": 0,
+            "currentCallId": None,
+            "currentCallType": None,
+            "dispositionStartedAt": None,
+            "break_stats": {
+                "tea_break": {"count": 0, "total_seconds": 0},
+                "lunch_break": {"count": 0, "total_seconds": 0},
+                "personal_reason": {"count": 0, "total_seconds": 0}
+            }
+        })
+    else:
+        if new_status == "ready":
+            set_updates["waiting_started_at"] = now_iso
+        elif current_status == "ready":
+            set_updates["waiting_started_at"] = None
     
     update_doc = {"$set": set_updates, "$inc": {"version": 1}}
     if inc_updates:
         update_doc["$inc"].update(inc_updates)
 
-    # Use optimistic locking (version) in a more advanced scenario, but basic $set/$inc is atomic per document in MongoDB.
     await users_col.update_one(query, update_doc)
     
     # Fetch unified telemetry object
@@ -348,8 +383,26 @@ async def record_presence_change(
         "stateStartedAt": now_iso,
         "last_status_change": now_iso,
         "login_at": login_val,
+        "logout_at": logout_val,
+        "shift_date": shift_date,
         "serverTime": now_iso,
         "version": current_version,
+        "ready_seconds": total_ready,
+        "total_ready_seconds": total_ready,
+        "paused_seconds": total_pause,
+        "total_pause_seconds": total_pause,
+        "total_break_seconds": total_pause,
+        "talk_seconds": total_talk,
+        "total_talk_seconds": total_talk,
+        "ringing_seconds": total_ringing,
+        "total_ringing_seconds": total_ringing,
+        "dispose_seconds": total_wrapup,
+        "total_wrapup_seconds": total_wrapup,
+        "waiting_seconds": updated_user.get("waiting_seconds", 0),
+        "waiting_started_at": updated_user.get("waiting_started_at"),
+        "total_calls_handled": updated_user.get("total_calls_handled", 0),
+        "gross_seconds": gross_seconds,
+        "total_login_seconds": gross_seconds,
         "telemetry": {
             "readySeconds": total_ready,
             "pauseSeconds": total_pause,
@@ -415,7 +468,7 @@ async def record_call_completion(
     """Idempotently records completed call, increments total_calls_handled, talk_seconds, and dispose_seconds in MongoDB, and emits WebSocket broadcast."""
     now = utcnow()
     now_iso = now.isoformat()
-    shift_date = now.strftime("%Y-%m-%d")
+    shift_date = get_local_date_str(now)
 
     if call_duration is not None and duration_seconds == 0:
         duration_seconds = call_duration
@@ -542,7 +595,7 @@ async def get_agents_presence(current_user: dict = Depends(get_current_user)):
     agents = []
     now = utcnow()
     now_iso = now.isoformat()
-    today_str = now.strftime("%Y-%m-%d")
+    today_str = get_local_date_str(now)
 
     async for u in cursor:
         uid = str(u["_id"])
@@ -711,7 +764,7 @@ async def get_current_shift_summary(
     """Fetch live or completed shift telemetry summary for current user for today or a specific date."""
     uid_str = str(current_user["_id"])
     now = utcnow()
-    today_str = now.strftime("%Y-%m-%d")
+    today_str = get_local_date_str(now)
     shift_date = date or today_str
 
     user = await users_col.find_one({"_id": current_user["_id"]})
@@ -828,7 +881,7 @@ async def get_my_presence_endpoint(current_user: dict = Depends(get_current_user
 
     now = utcnow()
     now_iso = now.isoformat()
-    today_str = now.strftime("%Y-%m-%d")
+    today_str = get_local_date_str(now)
 
     # Check today's attendance record
     today_att = await attendance_col.find_one({"agent_id": uid, "date": today_str})
@@ -944,9 +997,9 @@ async def get_my_presence_endpoint(current_user: dict = Depends(get_current_user
             if check_in_dt_naive is None or st_naive >= check_in_dt_naive:
                 session_calls.append(c)
 
-    total_calls_session = len(session_calls)
-    talk_sec_session = sum(c.get("duration_seconds", 0) for c in session_calls)
-    dispose_sec_session = sum(c.get("dispose_seconds", 0) for c in session_calls)
+    total_calls_session = len(session_calls) if is_today else 0
+    talk_sec_session = sum(c.get("duration_seconds", 0) for c in session_calls) if is_today else 0
+    dispose_sec_session = sum(c.get("dispose_seconds", 0) for c in session_calls) if is_today else 0
 
     return {
         "success": True,
@@ -1096,7 +1149,7 @@ async def handle_session_start(current_user: dict):
         raise HTTPException(status_code=400, detail="Failed to start agent session")
     
     now_iso = res.get("login_at") or utcnow().isoformat()
-    today_str = res.get("shift_date") or utcnow().strftime("%Y-%m-%d")
+    today_str = res.get("shift_date") or get_local_date_str(utcnow())
 
     return {
         "success": True,
@@ -1210,7 +1263,7 @@ async def handle_session_resync(current_user: dict):
 
     now = utcnow()
     now_iso = now.isoformat()
-    today_str = now.strftime("%Y-%m-%d")
+    today_str = get_local_date_str(now)
 
     today_att = await attendance_col.find_one({"agent_id": uid_str, "date": today_str})
     has_checked_in = bool(today_att and today_att.get("check_in_time") and today_att.get("status") not in ("NOT_CHECKED_IN", "ABSENT"))
@@ -1333,9 +1386,9 @@ async def handle_session_resync(current_user: dict):
             if check_in_dt_naive is None or st_naive >= check_in_dt_naive:
                 session_calls.append(c)
 
-    total_calls_today = len(session_calls)
-    talk_sec_today = sum(c.get("duration_seconds", 0) for c in session_calls)
-    completed_dispose_sec = sum(c.get("dispose_seconds", 0) for c in session_calls)
+    total_calls_today = len(session_calls) if is_today else 0
+    talk_sec_today = sum(c.get("duration_seconds", 0) for c in session_calls) if is_today else 0
+    completed_dispose_sec = sum(c.get("dispose_seconds", 0) for c in session_calls) if is_today else 0
     tot_dispose_sec = completed_dispose_sec + active_wrapup_sec
 
     return {
@@ -1408,7 +1461,7 @@ async def handle_get_active_session(current_user: dict):
 
     now = utcnow()
     now_iso = now.isoformat()
-    today_str = now.strftime("%Y-%m-%d")
+    today_str = get_local_date_str(now)
     is_today = (user.get("shift_date") == today_str)
 
     raw_st = user.get("status", "offline") if is_today else "offline"
@@ -1559,7 +1612,7 @@ async def get_current_session_endpoint(current_user: dict = Depends(get_current_
         
     now = utcnow()
     now_iso = now.isoformat()
-    shift_date = now.strftime("%Y-%m-%d")
+    shift_date = get_local_date_str(now)
     user_shift_date = user.get("shift_date")
     
     current_status = user.get("status", "offline") if user_shift_date == shift_date else "offline"

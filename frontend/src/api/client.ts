@@ -92,15 +92,11 @@ export async function apiFetch(
     path.startsWith("/api/auth/refresh");
 
   if (!token && !isPublicPath) {
-    if (typeof localStorage !== "undefined") {
-      localStorage.removeItem("access_token");
-      localStorage.removeItem("user");
-    }
-    if (typeof window !== "undefined") {
+    // Only dispatch unauthorized if not already on login page
+    if (typeof window !== "undefined" && !window.location.hash.includes("/login")) {
       window.dispatchEvent(new CustomEvent("auth:unauthorized"));
-      window.location.hash = "#/login";
     }
-    throw new Error("Session expired. Please sign in again.");
+    throw new Error("Session expired or authentication token missing.");
   }
 
   const headers: Record<string, string> = {
@@ -131,17 +127,19 @@ export async function apiFetch(
 
       clearTimeout(timeoutId);
 
-      // Handle token expiration safely for HashRouter/Electron
+      // Handle 401 Unauthorized safely: only wipe localStorage if on core auth verify or explicitly unauthorized
       if (res.status === 401 && !isPublicPath) {
-        if (typeof localStorage !== "undefined") {
-          localStorage.removeItem("access_token");
-          localStorage.removeItem("user");
+        if (path.startsWith("/api/auth") || path.startsWith("/api/users/me")) {
+          if (typeof localStorage !== "undefined") {
+            localStorage.removeItem("access_token");
+            localStorage.removeItem("user");
+          }
+          if (typeof window !== "undefined" && !window.location.hash.includes("/login")) {
+            window.dispatchEvent(new CustomEvent("auth:unauthorized"));
+            window.location.hash = "#/login";
+          }
         }
-        if (typeof window !== "undefined") {
-          window.dispatchEvent(new CustomEvent("auth:unauthorized"));
-          window.location.hash = "#/login";
-        }
-        const authErr = new Error("Session expired. Please sign in again.");
+        const authErr = new Error("Authentication failed (401 Unauthorized).");
         authErr.name = "AuthError";
         throw authErr;
       }

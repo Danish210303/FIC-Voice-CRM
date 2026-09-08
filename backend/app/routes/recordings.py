@@ -239,6 +239,7 @@ async def download_and_store_recording_task(recording_id: str, remote_url: str, 
 
 # ─── 0. DIRECT BROWSER AUDIO RECORDING UPLOAD ─────────────────────────────────
 @router.post("/upload", dependencies=[Depends(require_roles(Role.ADMIN, Role.TEAM_LEADER, Role.AGENT))])
+@router.post("/upload/", dependencies=[Depends(require_roles(Role.ADMIN, Role.TEAM_LEADER, Role.AGENT))])
 async def upload_call_recording(
     file: UploadFile = File(...),
     call_id: str = Form(...),
@@ -397,7 +398,7 @@ async def upload_call_recording(
         }}
     )
 
-    logger.info(f"[DATABASE] database save completed for call {call_id}: recording_id={rec_id}, public_id={public_id}, secure_url={secure_url}")
+    logger.info(f"[DATABASE] callId: {call_id} | recordingUrl: {secure_url} | saveCompleted: true")
 
     # Real-time WebSocket event
     ws_event = {

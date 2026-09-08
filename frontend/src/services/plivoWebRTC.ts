@@ -554,8 +554,25 @@ class PlivoWebRTCService {
   // ──────────────────────────────────────────────
   // Remote Audio Stream Binding & Validation
   // ──────────────────────────────────────────────
-  private bindRemoteStream(stream: any): void {
-    if (!stream) return;
+  private bindRemoteStream(streamOrEvent: any): void {
+    if (!streamOrEvent) return;
+
+    let stream: MediaStream | null = null;
+    if (streamOrEvent instanceof MediaStream) {
+      stream = streamOrEvent;
+    } else if (streamOrEvent && streamOrEvent.stream instanceof MediaStream) {
+      stream = streamOrEvent.stream;
+    } else if (streamOrEvent && streamOrEvent.mediaStream instanceof MediaStream) {
+      stream = streamOrEvent.mediaStream;
+    } else if (typeof (window as any).MediaStream !== "undefined" && streamOrEvent instanceof (window as any).MediaStream) {
+      stream = streamOrEvent;
+    }
+
+    if (!stream) {
+      console.warn("[MEDIA] bindRemoteStream: Argument is not a valid MediaStream instance:", streamOrEvent);
+      return;
+    }
+
     this.remoteStream = stream;
 
     const tracks = stream.getAudioTracks ? stream.getAudioTracks() : [];
@@ -578,20 +595,24 @@ class PlivoWebRTCService {
         document.body.appendChild(elem);
       }
 
-      elem.srcObject = stream;
-      elem.muted = false;
-      elem.volume = 1.0;
-      elem.autoplay = true;
+      try {
+        elem.srcObject = stream;
+        elem.muted = false;
+        elem.volume = 1.0;
+        elem.autoplay = true;
 
-      elem
-        .play()
-        .then(() => {
-          console.log(`[MEDIA] Remote audio playback active on #${id}`);
-          this.diagnostics.audioElementPlaying = true;
-        })
-        .catch((err) => {
-          console.warn(`[MEDIA] Autoplay deferred on #${id}:`, err);
-        });
+        elem
+          .play()
+          .then(() => {
+            console.log(`[MEDIA] Remote audio playback active on #${id}`);
+            this.diagnostics.audioElementPlaying = true;
+          })
+          .catch((err) => {
+            console.warn(`[MEDIA] Autoplay deferred on #${id}:`, err);
+          });
+      } catch (err) {
+        console.warn(`[MEDIA] Failed to assign srcObject to #${id}:`, err);
+      }
     });
 
     this.diagnostics.audioElementExists = true;

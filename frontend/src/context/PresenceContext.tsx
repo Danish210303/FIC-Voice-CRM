@@ -403,15 +403,15 @@ export const PresenceProvider: React.FC<{ children: React.ReactNode }> = ({ chil
             logout_at: activeSession?.logoutTime || me?.logout_at,
             current_break: hasCheckedIn ? (activeSession?.currentBreak || me?.current_break) : null,
             break_logs: hasCheckedIn ? (activeSession?.breakLogs || me?.break_logs) : [],
-            ready_seconds: tel.readySeconds ?? me?.ready_seconds ?? 0,
-            paused_seconds: tel.pauseSeconds ?? me?.paused_seconds ?? 0,
-            talk_seconds: tel.talkSeconds ?? me?.talk_seconds ?? 0,
-            ringing_seconds: tel.ringingSeconds ?? me?.ringing_seconds ?? 0,
-            dispose_seconds: tel.wrapUpSeconds ?? me?.dispose_seconds ?? 0,
-            gross_seconds: tel.sessionSeconds ?? me?.gross_seconds ?? 0,
-            total_calls_handled: tel.callsHandled ?? me?.total_calls_handled ?? 0,
-            breaks_taken: tel.breaksTaken ?? 0,
-            state_started_at: currentSession?.stateStartedAt || me?.statusSince || new Date().toISOString()
+            ready_seconds: hasCheckedIn ? (tel.readySeconds ?? me?.ready_seconds ?? 0) : 0,
+            paused_seconds: hasCheckedIn ? (tel.pauseSeconds ?? me?.paused_seconds ?? 0) : 0,
+            talk_seconds: hasCheckedIn ? (tel.talkSeconds ?? me?.talk_seconds ?? 0) : 0,
+            ringing_seconds: hasCheckedIn ? (tel.ringingSeconds ?? me?.ringing_seconds ?? 0) : 0,
+            dispose_seconds: hasCheckedIn ? (tel.wrapUpSeconds ?? me?.dispose_seconds ?? 0) : 0,
+            gross_seconds: hasCheckedIn ? (tel.sessionSeconds ?? me?.gross_seconds ?? 0) : 0,
+            total_calls_handled: hasCheckedIn ? (tel.callsHandled ?? me?.total_calls_handled ?? 0) : 0,
+            breaks_taken: hasCheckedIn ? (tel.breaksTaken ?? 0) : 0,
+            state_started_at: hasCheckedIn ? (currentSession?.stateStartedAt || me?.statusSince || new Date().toISOString()) : null
           };
           setMyPresence((prev) => ({ ...prev, ...fullMe }));
         }
@@ -881,9 +881,9 @@ export const PresenceProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         : newStatus === "offline" ? "/api/agent/session/logout"
         : "/api/presence/status";
 
-      const fallbackEndpoint = newStatus === "ready" ? "/api/agents/me/break/resume"
-        : newStatus === "paused" ? "/api/agents/me/break/start"
-        : newStatus === "offline" ? "/api/agents/me/offline"
+      const fallbackEndpoint = newStatus === "ready" ? "/api/agent/presence/ready"
+        : newStatus === "paused" ? "/api/agent/presence/pause"
+        : newStatus === "offline" ? "/api/agent/presence/offline"
         : "/api/presence/status";
 
       console.log("[SESSION API] Sending outbound status change to:", primaryEndpoint, {

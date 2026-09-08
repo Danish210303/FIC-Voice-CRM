@@ -2094,240 +2094,247 @@ async def start_vapi_dial(payload: VapiDialPayload, user: dict = Depends(get_cur
     log = logging.getLogger("uvicorn.error")
     log.info(f"Vapi dial request started | Lead Phone: {payload.phone}")
 
-    e164_phone = normalize_e164(payload.phone)
-    if not e164_phone or len(e164_phone) < 10:
-        log.error(f"Phone number validation failed: {payload.phone}")
-        return JSONResponse(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            content={
-                "success": False,
-                "error": "Invalid phone number provided",
-                "status": 400,
-                "details": f"Provided phone number '{payload.phone}' is invalid. Must be valid mobile digits."
-            }
-        )
-
-    log.info(f"Phone number validated: {mask_phone(e164_phone)}")
-
-    vapi_api_key = getattr(settings, 'VAPI_API_KEY', '') or os.getenv('VAPI_API_KEY', '')
-    vapi_assistant_id = payload.assistant_id or getattr(settings, 'VAPI_ASSISTANT_ID', '') or os.getenv('VAPI_ASSISTANT_ID', '')
-    vapi_phone_id = payload.phone_number_id or getattr(settings, 'VAPI_PHONE_NUMBER_ID', '') or os.getenv('VAPI_PHONE_NUMBER_ID', '')
-    vapi_base_url = (getattr(settings, 'VAPI_BASE_URL', '') or os.getenv('VAPI_BASE_URL', 'https://api.vapi.ai')).rstrip('/')
-
-    missing_configs = []
-    if not vapi_api_key:
-        missing_configs.append("VAPI_API_KEY")
-    if not vapi_assistant_id:
-        missing_configs.append("VAPI_ASSISTANT_ID")
-    if not vapi_phone_id:
-        missing_configs.append("VAPI_PHONE_NUMBER_ID")
-
-    if missing_configs:
-        err_msg = f"Missing Vapi configuration environment variables: {', '.join(missing_configs)}"
-        log.error(f"[Vapi Dial Error] {err_msg}")
-        return JSONResponse(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            content={
-                "success": False,
-                "error": "Vapi configuration missing",
-                "status": 400,
-                "details": err_msg
-            }
-        )
-
-    assigned_agent_id = _uid(user)
-    e164_phone = normalize_phone(payload.phone)
-    if not e164_phone:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid phone number provided")
-
-    print(f"[MANUAL] phone normalized: success ({e164_phone})")
-
-    lead = await leads_col.find_one({"phone": e164_phone})
-    if lead:
-        print(f"[MANUAL] lead lookup: found ({lead.get('lead_id')})")
-    else:
-        print("[MANUAL] lead lookup: not-found")
-        effective_pool = payload.pool_id or user.get("pool_id") or "6a6b40b7841e208e1cb69469"
-        new_lead_doc = {
-            "lead_id": gen_lead_id(),
-            "name": payload.name or f"Manual Lead - {e164_phone[-10:]}",
-            "phone": e164_phone,
-            "source": "Manual Dialer",
-            "status": "new",
-            "pool_id": effective_pool,
-            "assigned_agent_id": assigned_agent_id,
-            "supervisor_id": user.get("supervisor_id"),
-            "agent_id": assigned_agent_id,
-            "agent_name": user.get("name"),
-            "branch_id": user.get("branch_id") or "HQ",
-            "created_by": assigned_agent_id,
-            "created_at": utcnow(),
-            "updated_at": utcnow(),
-            "ai_score": 85,
-            "extra": {}
-        }
-        res = await leads_col.insert_one(new_lead_doc)
-        new_lead_doc["_id"] = res.inserted_id
-        lead = new_lead_doc
-        print(f"[MANUAL] lead created: {lead['lead_id']}")
-
-    print(f"[MANUAL] assigned lead sync: success")
-    lead_id_str = str(lead.get("_id"))
-
-    # Automatically clean any stale ghost call sessions
-    await cleanup_stale_db_calls(agent_id=assigned_agent_id, lead_id=lead_id_str)
-
-    acquired, lock_reason = acquire_call_lock(e164_phone, assigned_agent_id, payload.idempotency_key)
-    if not acquired:
-        if lock_reason == "IDEMPOTENCY_HIT" and payload.idempotency_key:
-            return processed_idempotency_keys[payload.idempotency_key]["result"]
-        return JSONResponse(
-            status_code=status.HTTP_409_CONFLICT,
-            content={
-                "success": False,
-                "error": "Active call lock conflict",
-                "status": 409,
-                "details": lock_reason
-            }
-        )
-
-    base_url = getattr(settings, 'BASE_URL', 'https://ai-voice-agent-crm.onrender.com').rstrip('/')
-    vapi_payload = {
-        "assistantId": vapi_assistant_id,
-        "phoneNumberId": vapi_phone_id,
-        "customer": {
-            "number": e164_phone,
-            "name": payload.name or (lead.get("name") if lead else f"Customer - {e164_phone}")
-        },
-        "assistantOverrides": {
-            "serverUrl": f"{base_url}/api/calls/vapi-webhook"
-        }
-    }
-
-    headers = {
-        "Authorization": f"Bearer {vapi_api_key}",
-        "Content-Type": "application/json"
-    }
-
-    vapi_endpoint = f"{vapi_base_url}/call"
-    log.info(
-        f"Vapi request sent to {vapi_endpoint} | Lead ID: {lead_id_str} | Phone: {mask_phone(e164_phone)} | "
-        f"Assistant ID: {vapi_assistant_id} | Phone Number ID: {vapi_phone_id}"
-    )
-
-    vapi_call_id = None
-
     try:
-        client = get_http_client()
-        res = await client.post(vapi_endpoint, json=vapi_payload, headers=headers, timeout=10.0)
-        log.info(f"Vapi response status: {res.status_code}")
-
-        if res.status_code in (200, 201):
-            res_data = res.json()
-            vapi_call_id = res_data.get("id")
-            log.info(f"Vapi call ID: {vapi_call_id}")
-        else:
-            release_call_lock(phone=e164_phone, agent_id=assigned_agent_id)
-            err_text = res.text
-            try:
-                err_json = res.json()
-                err_msg = err_json.get("message") or err_json.get("error") or err_text
-                if isinstance(err_msg, list):
-                    err_msg = "; ".join([str(x) for x in err_msg])
-            except Exception:
-                err_msg = err_text
-
-            log.error(
-                f"[Vapi API Failure] Lead ID: {lead_id_str} | Phone: {mask_phone(e164_phone)} | "
-                f"Vapi Status: {res.status_code} | Error: {err_msg}"
-            )
-
+        e164_phone = normalize_e164(payload.phone)
+        if not e164_phone or len(e164_phone) < 10:
+            log.error(f"Phone number validation failed: {payload.phone}")
             return JSONResponse(
-                status_code=res.status_code if res.status_code in (400, 401, 403, 404, 500) else status.HTTP_400_BAD_REQUEST,
+                status_code=status.HTTP_400_BAD_REQUEST,
                 content={
                     "success": False,
-                    "error": f"Vapi call creation failed ({res.status_code})",
-                    "status": res.status_code,
-                    "details": str(err_msg)
+                    "error": "Invalid phone number provided",
+                    "status": 400,
+                    "details": f"Provided phone number '{payload.phone}' is invalid. Must be valid mobile digits."
                 }
             )
-    except httpx.TimeoutException:
-        release_call_lock(phone=e164_phone, agent_id=assigned_agent_id)
-        log.error(f"[Vapi Timeout] Lead ID: {lead_id_str} | Phone: {mask_phone(e164_phone)} timed out after 15s")
+
+        log.info(f"Phone number validated: {mask_phone(e164_phone)}")
+
+        vapi_api_key = getattr(settings, 'VAPI_API_KEY', '') or os.getenv('VAPI_API_KEY', '')
+        vapi_assistant_id = payload.assistant_id or getattr(settings, 'VAPI_ASSISTANT_ID', '') or os.getenv('VAPI_ASSISTANT_ID', '')
+        vapi_phone_id = payload.phone_number_id or getattr(settings, 'VAPI_PHONE_NUMBER_ID', '') or os.getenv('VAPI_PHONE_NUMBER_ID', '')
+        vapi_base_url = (getattr(settings, 'VAPI_BASE_URL', '') or os.getenv('VAPI_BASE_URL', 'https://api.vapi.ai')).rstrip('/')
+
+        missing_configs = []
+        if not vapi_api_key:
+            missing_configs.append("VAPI_API_KEY")
+        if not vapi_assistant_id:
+            missing_configs.append("VAPI_ASSISTANT_ID")
+        if not vapi_phone_id:
+            missing_configs.append("VAPI_PHONE_NUMBER_ID")
+
+        if missing_configs:
+            err_msg = f"Missing Vapi configuration environment variables: {', '.join(missing_configs)}"
+            log.error(f"[Vapi Dial Error] {err_msg}")
+            return JSONResponse(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                content={
+                    "success": False,
+                    "error": "Vapi configuration missing",
+                    "status": 400,
+                    "details": err_msg
+                }
+            )
+
+        assigned_agent_id = _uid(user)
+
+        lead = await leads_col.find_one({"phone": e164_phone})
+        if lead:
+            print(f"[MANUAL] lead lookup: found ({lead.get('lead_id')})")
+        else:
+            print("[MANUAL] lead lookup: not-found")
+            effective_pool = payload.pool_id or user.get("pool_id") or "6a6b40b7841e208e1cb69469"
+            new_lead_doc = {
+                "lead_id": gen_lead_id(),
+                "name": payload.name or f"Manual Lead - {e164_phone[-10:]}",
+                "phone": e164_phone,
+                "source": "Manual Dialer",
+                "status": "new",
+                "pool_id": effective_pool,
+                "assigned_agent_id": assigned_agent_id,
+                "supervisor_id": user.get("supervisor_id"),
+                "agent_id": assigned_agent_id,
+                "agent_name": user.get("name"),
+                "branch_id": user.get("branch_id") or "HQ",
+                "created_by": assigned_agent_id,
+                "created_at": utcnow(),
+                "updated_at": utcnow(),
+                "ai_score": 85,
+                "extra": {}
+            }
+            res = await leads_col.insert_one(new_lead_doc)
+            new_lead_doc["_id"] = res.inserted_id
+            lead = new_lead_doc
+            print(f"[MANUAL] lead created: {lead['lead_id']}")
+
+        print(f"[MANUAL] assigned lead sync: success")
+        lead_id_str = str(lead.get("_id"))
+
+        # Automatically clean any stale ghost call sessions
+        await cleanup_stale_db_calls(agent_id=assigned_agent_id, lead_id=lead_id_str)
+
+        acquired, lock_reason = acquire_call_lock(e164_phone, assigned_agent_id, payload.idempotency_key)
+        if not acquired:
+            if lock_reason == "IDEMPOTENCY_HIT" and payload.idempotency_key:
+                return processed_idempotency_keys[payload.idempotency_key]["result"]
+            return JSONResponse(
+                status_code=status.HTTP_409_CONFLICT,
+                content={
+                    "success": False,
+                    "error": "Active call lock conflict",
+                    "status": 409,
+                    "details": lock_reason
+                }
+            )
+
+        base_url = getattr(settings, 'BASE_URL', 'https://ai-voice-agent-crm.onrender.com').rstrip('/')
+        vapi_payload = {
+            "assistantId": vapi_assistant_id,
+            "phoneNumberId": vapi_phone_id,
+            "customer": {
+                "number": e164_phone,
+                "name": payload.name or (lead.get("name") if lead else f"Customer - {e164_phone}")
+            },
+            "assistantOverrides": {
+                "serverUrl": f"{base_url}/api/calls/vapi-webhook"
+            }
+        }
+
+        headers = {
+            "Authorization": f"Bearer {vapi_api_key}",
+            "Content-Type": "application/json"
+        }
+
+        vapi_endpoint = f"{vapi_base_url}/call"
+        log.info(
+            f"Vapi request sent to {vapi_endpoint} | Lead ID: {lead_id_str} | Phone: {mask_phone(e164_phone)} | "
+            f"Assistant ID: {vapi_assistant_id} | Phone Number ID: {vapi_phone_id}"
+        )
+
+        vapi_call_id = None
+
+        try:
+            client = get_http_client()
+            res = await client.post(vapi_endpoint, json=vapi_payload, headers=headers, timeout=10.0)
+            log.info(f"Vapi response status: {res.status_code}")
+
+            if res.status_code in (200, 201):
+                res_data = res.json()
+                vapi_call_id = res_data.get("id")
+                log.info(f"Vapi call ID: {vapi_call_id}")
+            else:
+                release_call_lock(phone=e164_phone, agent_id=assigned_agent_id)
+                err_text = res.text
+                try:
+                    err_json = res.json()
+                    err_msg = err_json.get("message") or err_json.get("error") or err_text
+                    if isinstance(err_msg, list):
+                        err_msg = "; ".join([str(x) for x in err_msg])
+                except Exception:
+                    err_msg = err_text
+
+                log.error(
+                    f"[Vapi API Failure] Lead ID: {lead_id_str} | Phone: {mask_phone(e164_phone)} | "
+                    f"Vapi Status: {res.status_code} | Error: {err_msg}"
+                )
+
+                return JSONResponse(
+                    status_code=res.status_code if res.status_code in (400, 401, 403, 404, 500) else status.HTTP_400_BAD_REQUEST,
+                    content={
+                        "success": False,
+                        "error": f"Vapi call creation failed ({res.status_code})",
+                        "status": res.status_code,
+                        "details": str(err_msg)
+                    }
+                )
+        except httpx.TimeoutException:
+            release_call_lock(phone=e164_phone, agent_id=assigned_agent_id)
+            log.error(f"[Vapi Timeout] Lead ID: {lead_id_str} | Phone: {mask_phone(e164_phone)} timed out after 15s")
+            return JSONResponse(
+                status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+                content={
+                    "success": False,
+                    "error": "Vapi API request timed out",
+                    "status": 504,
+                    "details": "Vapi API request timed out (15s). Please verify network and Vapi service status."
+                }
+            )
+        except Exception as exc:
+            release_call_lock(phone=e164_phone, agent_id=assigned_agent_id)
+            log.error(f"[Vapi Connection Exception] Lead ID: {lead_id_str} | Error: {str(exc)}")
+            return JSONResponse(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                content={
+                    "success": False,
+                    "error": "Failed to connect to Vapi API",
+                    "status": 502,
+                    "details": str(exc)
+                }
+            )
+
+        doc = {
+            "lead_id": lead_id_str,
+            "phone": e164_phone,
+            "call_source": "manual_dialer",
+            "call_type": "outbound",
+            "pool_id": payload.pool_id or "general",
+            "agent_id": assigned_agent_id,
+            "direction": "outbound",
+            "status": "live",
+            "call_mode": "ai",
+            "is_ai": True,
+            "vapi_call_id": vapi_call_id,
+            "call_state": "active",
+            "muted": False,
+            "priority": "high",
+            "language": "english",
+            "notes": "Vapi AI Voice Agent Call",
+            "sip_logs": [
+                f"[{utcnow().isoformat()}] [VAPI] Initiated outbound AI call to {e164_phone}",
+                f"[{utcnow().isoformat()}] [VAPI] Vapi Call ID: {vapi_call_id}"
+            ],
+            "transcript_list": [],
+            "ai_suggestions": [],
+            "sentiment": "neutral",
+            "recording_status": "recording",
+            "started_at": utcnow(),
+        }
+
+        result = await calls_col.insert_one(doc)
+        call_id_str = str(result.inserted_id)
+        doc["_id"] = result.inserted_id
+
+        print(f"[MANUAL] call created: {call_id_str}")
+
+        response_doc = oid_str(doc)
+        response_doc["success"] = True
+        response_doc["message"] = "Call started successfully"
+        response_doc["callId"] = vapi_call_id
+
+        register_call_lock(e164_phone, assigned_agent_id, call_id_str, payload.idempotency_key, response_doc)
+
+        ws_payload = {
+            "event": "vapi_call_started",
+            "call_id": call_id_str,
+            "vapi_call_id": vapi_call_id,
+            "phone": e164_phone,
+            "agent_id": assigned_agent_id,
+            "status": "calling"
+        }
+        await ws_manager.broadcast_global(ws_payload)
+
+        return JSONResponse(status_code=status.HTTP_200_OK, content=response_doc)
+    except Exception as e:
+        log.error(f"[Vapi Dial Exception] Error: {str(e)}", exc_info=True)
         return JSONResponse(
-            status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             content={
                 "success": False,
-                "error": "Vapi API request timed out",
-                "status": 504,
-                "details": "Vapi API request timed out (15s). Please verify network and Vapi service status."
+                "error": "Vapi dial initiation failed",
+                "status": 500,
+                "details": str(e)
             }
         )
-    except Exception as exc:
-        release_call_lock(phone=e164_phone, agent_id=assigned_agent_id)
-        log.error(f"[Vapi Connection Exception] Lead ID: {lead_id_str} | Error: {str(exc)}")
-        return JSONResponse(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            content={
-                "success": False,
-                "error": "Failed to connect to Vapi API",
-                "status": 502,
-                "details": str(exc)
-            }
-        )
-
-    doc = {
-        "lead_id": lead_id_str,
-        "phone": e164_phone,
-        "call_source": "manual_dialer",
-        "call_type": "outbound",
-        "pool_id": payload.pool_id or "general",
-        "agent_id": assigned_agent_id,
-        "direction": "outbound",
-        "status": "live",
-        "call_mode": "ai",
-        "is_ai": True,
-        "vapi_call_id": vapi_call_id,
-        "call_state": "active",
-        "muted": False,
-        "priority": "high",
-        "language": "english",
-        "notes": "Vapi AI Voice Agent Call",
-        "sip_logs": [
-            f"[{utcnow().isoformat()}] [VAPI] Initiated outbound AI call to {e164_phone}",
-            f"[{utcnow().isoformat()}] [VAPI] Vapi Call ID: {vapi_call_id}"
-        ],
-        "transcript_list": [],
-        "ai_suggestions": [],
-        "sentiment": "neutral",
-        "recording_status": "recording",
-        "started_at": utcnow(),
-    }
-
-    result = await calls_col.insert_one(doc)
-    call_id_str = str(result.inserted_id)
-    doc["_id"] = result.inserted_id
-
-    print(f"[MANUAL] call created: {call_id_str}")
-
-    response_doc = oid_str(doc)
-    response_doc["success"] = True
-    response_doc["message"] = "Call started successfully"
-    response_doc["callId"] = vapi_call_id
-
-    register_call_lock(e164_phone, assigned_agent_id, call_id_str, payload.idempotency_key, response_doc)
-
-    ws_payload = {
-        "event": "vapi_call_started",
-        "call_id": call_id_str,
-        "vapi_call_id": vapi_call_id,
-        "phone": e164_phone,
-        "agent_id": assigned_agent_id,
-        "status": "calling"
-    }
-    await ws_manager.broadcast("global", ws_payload)
-
-    return JSONResponse(status_code=status.HTTP_200_OK, content=response_doc)
 
 
 

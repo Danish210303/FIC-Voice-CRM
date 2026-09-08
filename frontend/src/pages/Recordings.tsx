@@ -489,7 +489,9 @@ export default function Recordings() {
   };
 
   const copyToClipboard = (text: string, label: string) => {
-    navigator.clipboard.writeText(text);
+    if (navigator?.clipboard?.writeText) {
+      navigator.clipboard.writeText(text).catch(() => {});
+    }
     showToast(`${label} copied to clipboard!`, "info");
   };
 
@@ -1048,17 +1050,23 @@ export default function Recordings() {
                             setCurrentTime(audioRef.current.currentTime);
                           }
                         }}
+                        onCanPlay={() => {
+                          const dur = audioRef.current?.duration || selectedRec.duration_seconds || selectedRec.duration || 0;
+                          console.log(`[PLAYER] audioUrl: ${playbackUrl || getStreamFallbackUrl(selectedRec)} | canPlay: true | duration: ${dur} | loadError: none`);
+                        }}
                         onLoadedMetadata={() => {
                           if (audioRef.current) {
-                            setAudioDuration(audioRef.current.duration || selectedRec.duration_seconds || selectedRec.duration || 0);
+                            const dur = audioRef.current.duration || selectedRec.duration_seconds || selectedRec.duration || 0;
+                            setAudioDuration(dur);
                             setAudioLoading(false);
+                            console.log(`[PLAYER] audioUrl: ${playbackUrl || getStreamFallbackUrl(selectedRec)} | canPlay: true | duration: ${dur} | loadError: none`);
                           }
                         }}
                         onWaiting={() => setAudioLoading(true)}
                         onPlaying={() => setAudioLoading(false)}
                         onEnded={() => setIsPlaying(false)}
                         onError={(e) => {
-                          console.warn("Audio element stream error:", e);
+                          console.error(`[PLAYER] audioUrl: ${playbackUrl || getStreamFallbackUrl(selectedRec)} | canPlay: false | duration: 0 | loadError: Audio stream unavailable`);
                           setAudioLoading(false);
                           setAudioError("Audio playback connecting. Retrying signed source...");
                         }}

@@ -511,9 +511,11 @@ export default function Dialer() {
   const [historySearchQuery, setHistorySearchQuery] = useState("");
 
   // DERIVED TELEMETRY & METRICS (INITIALIZED AFTER ALL STATES)
-  const totalCallsHandled = (myPresence?.total_calls_handled !== undefined && myPresence?.total_calls_handled !== null)
-    ? myPresence.total_calls_handled
-    : (callHistory ? callHistory.length : 0);
+  const totalCallsHandled = isCheckedInToday
+    ? (myPresence?.total_calls_handled !== undefined && myPresence?.total_calls_handled !== null
+        ? myPresence.total_calls_handled
+        : 0)
+    : 0;
 
   const shiftLogPercentage = totalCallsHandled > 0 ? "100% Shift Log" : "0% Shift Log";
 
@@ -619,8 +621,9 @@ export default function Dialer() {
   // Audio Recording Lifecycle: Start recording when connected, finalize & upload when call ends
   useEffect(() => {
     if (callStatus === "connected" && currentCallId) {
-      const stream = plivoWebRTC.getLocalStream();
-      audioRecorder.startRecording(stream, currentCallId).catch((err) => {
+      const localStream = plivoWebRTC.getLocalStream();
+      const remoteStream = plivoWebRTC.getRemoteStream();
+      audioRecorder.startRecording(localStream, currentCallId, remoteStream).catch((err) => {
         console.warn("[DIALER] Failed to start audio recorder:", err);
       });
     } else if (callStatus === "wrapup" || callStatus === "completed") {

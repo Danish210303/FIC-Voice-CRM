@@ -131,7 +131,9 @@ export default function LiveCallModal({
   };
 
   const handleCopyText = (text: string, idx: number) => {
-    navigator.clipboard.writeText(text);
+    if (navigator?.clipboard?.writeText) {
+      navigator.clipboard.writeText(text).catch(() => {});
+    }
     setCopiedIdx(idx);
     showToast("Text copied to clipboard", "info");
     setTimeout(() => setCopiedIdx(null), 2000);

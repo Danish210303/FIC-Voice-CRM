@@ -209,7 +209,9 @@ export default function LeadActionSlideOver({
   const assignedAgent = selectedLead.assigned_agent_id || user?.name || "Agent Agila G";
 
   const handleCopyUserId = () => {
-    navigator.clipboard.writeText(leadId);
+    if (navigator?.clipboard?.writeText) {
+      navigator.clipboard.writeText(leadId).catch(() => {});
+    }
     setCopiedId(true);
     showToast(`User ID copied: ${leadId}`, "success");
     setTimeout(() => setCopiedId(false), 2000);

@@ -63,11 +63,44 @@ class AudioRecorderService {
   }
 
   /**
+   * Mix local agent audio and remote customer audio into a single composite MediaStream.
+   */
+  private createMixedAudioStream(localStream?: MediaStream | null, remoteStream?: MediaStream | null): MediaStream | null {
+    const hasLocal = localStream && localStream.getAudioTracks().length > 0;
+    const hasRemote = remoteStream && remoteStream.getAudioTracks().length > 0;
+
+    if (hasLocal && hasRemote) {
+      try {
+        const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
+        if (AudioContextClass) {
+          const audioCtx = new AudioContextClass();
+          const destination = audioCtx.createMediaStreamDestination();
+
+          const localSource = audioCtx.createMediaStreamSource(localStream);
+          const remoteSource = audioCtx.createMediaStreamSource(remoteStream);
+
+          localSource.connect(destination);
+          remoteSource.connect(destination);
+
+          console.log("[AUDIO RECORDER] Successfully mixed local microphone and customer remote audio streams.");
+          return destination.stream;
+        }
+      } catch (mixErr) {
+        console.warn("[AUDIO RECORDER] AudioContext mixing fallback to remote/local stream:", mixErr);
+      }
+    }
+
+    if (hasRemote) return remoteStream;
+    if (hasLocal) return localStream;
+    return null;
+  }
+
+  /**
    * Starts audio recording for an active call session.
    */
-  public async startRecording(stream?: MediaStream | null, callId?: string): Promise<boolean> {
+  public async startRecording(stream?: MediaStream | null, callId?: string, remoteStream?: MediaStream | null): Promise<boolean> {
     if (this.isRecording && this.currentCallId === callId) {
-      console.log(`[AUDIO RECORDER] Recording already in progress for call ${callId}`);
+      console.log(`[RECORDING] already active for callId: ${callId}`);
       return true;
     }
 
@@ -85,7 +118,7 @@ class AudioRecorderService {
     this.isOwnStream = false;
 
     try {
-      let targetStream = stream;
+      let targetStream = this.createMixedAudioStream(stream, remoteStream);
 
       if (!targetStream || targetStream.getAudioTracks().length === 0) {
         if (typeof navigator !== "undefined" && navigator.mediaDevices?.getUserMedia) {
@@ -115,7 +148,7 @@ class AudioRecorderService {
       this.mediaRecorder.ondataavailable = (event: BlobEvent) => {
         if (event.data && event.data.size > 0) {
           this.recordedChunks.push(event.data);
-          console.log(`[AUDIO RECORDER] Received chunk: ${event.data.size} bytes (Total chunks: ${this.recordedChunks.length})`);
+          console.log(`[RECORDING] chunkCount: ${this.recordedChunks.length} | chunkSize: ${event.data.size} bytes`);
         }
       };
 
@@ -127,7 +160,7 @@ class AudioRecorderService {
       this.mediaRecorder.start(250);
       this.isRecording = true;
 
-      console.log(`[AUDIO RECORDER] Recording started for call ${this.currentCallId} | MIME: ${this.mimeType || "default"}`);
+      console.log(`[RECORDING] started: true | callId: ${this.currentCallId} | mimeType: ${this.mimeType || "default"}`);
       return true;
     } catch (err) {
       console.error(`[AUDIO RECORDER ERROR] Failed to start MediaRecorder for call ${this.currentCallId}:`, err);
@@ -144,10 +177,10 @@ class AudioRecorderService {
   public stopRecording(): Promise<{ blob: Blob; mimeType: string; extension: string } | null> {
     return new Promise((resolve) => {
       if (!this.mediaRecorder || this.mediaRecorder.state === "inactive" || !this.isRecording) {
-        console.log("[AUDIO RECORDER] Recorder is not active, returning existing chunks if any.");
         this.isRecording = false;
         if (this.recordedChunks.length > 0) {
           const blob = new Blob(this.recordedChunks, { type: this.mimeType || "audio/webm" });
+          console.log(`[RECORDING] finalBlobSize: ${blob.size} bytes | finalBlobType: ${blob.type}`);
           resolve({ blob, mimeType: this.mimeType, extension: this.getExtensionFromMime(this.mimeType) });
         } else {
           resolve(null);
@@ -172,7 +205,7 @@ class AudioRecorderService {
         }
 
         if (this.recordedChunks.length === 0) {
-          console.warn(`[AUDIO RECORDER] No audio chunks collected for call ${callId}`);
+          console.warn(`[RECORDING] No audio chunks collected for call ${callId}`);
           resolve(null);
           return;
         }
@@ -181,7 +214,7 @@ class AudioRecorderService {
         const completeBlob = new Blob(this.recordedChunks, { type: finalMime });
         const ext = this.getExtensionFromMime(finalMime);
 
-        console.log(`[AUDIO RECORDER] Recording stopped for call ${callId} | Chunks: ${this.recordedChunks.length} | Blob size: ${completeBlob.size} bytes | MIME: ${finalMime}`);
+        console.log(`[RECORDING] chunkCount: ${this.recordedChunks.length} | finalBlobSize: ${completeBlob.size} bytes | finalBlobType: ${finalMime}`);
 
         resolve({
           blob: completeBlob,
@@ -230,7 +263,7 @@ class AudioRecorderService {
     }
 
     if (!blob || blob.size === 0) {
-      console.warn(`[AUDIO RECORDER] Skipping upload for call ${callId}: Blob is empty (0 bytes).`);
+      console.warn(`[RECORDING] Skipping upload for call ${callId}: Blob is empty (0 bytes).`);
       return null;
     }
 
@@ -239,7 +272,7 @@ class AudioRecorderService {
       const ext = this.getExtensionFromMime(blob.type);
       const filename = `recording_${callId}_${Date.now()}.${ext}`;
 
-      console.log(`[AUDIO RECORDER] Upload started for call ${callId} (${blob.size} bytes, MIME: ${blob.type}, file: ${filename})...`);
+      console.log(`[UPLOAD] callId: ${callId} | requestStarted: true | finalBlobSize: ${blob.size} bytes | mimeType: ${blob.type} | filename: ${filename}`);
 
       const formData = new FormData();
       formData.append("file", blob, filename);
@@ -262,7 +295,7 @@ class AudioRecorderService {
           throw new Error("Backend response missing Cloudinary secure_url");
         }
 
-        console.log(`[AUDIO RECORDER] Cloudinary upload completed for call ${callId}: secure_url = ${response.secure_url}, public_id = ${response.public_id}`);
+        console.log(`[UPLOAD] callId: ${callId} | responseStatus: 200 | uploadCompleted: true | secureUrl: ${response.secure_url} | publicId: ${response.public_id}`);
 
         this.completedUploads.set(callId, response);
         return response;
