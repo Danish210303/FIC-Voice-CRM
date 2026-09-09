@@ -177,13 +177,14 @@ async def create_follow_up(
     return serialized
 
 
-@router.get("")
+@router.get("", include_in_schema=True)
+@router.get("/", include_in_schema=False)
 async def list_follow_ups(
     status_filter: Optional[str] = Query(None, alias="status"),
     agent_id: Optional[str] = Query(None),
     pool_id: Optional[str] = Query(None),
     search: Optional[str] = Query(None),
-    limit: int = Query(100, ge=1, le=500),
+    limit: int = Query(150, ge=1, le=500),
     current_user: dict = Depends(get_current_user)
 ):
     """
@@ -244,13 +245,20 @@ async def list_follow_ups(
         if raw_digits:
             query["$or"].append({"customer_phone": {"$regex": raw_digits}})
 
+    total_count = await follow_ups_col.count_documents(query)
     cursor = follow_ups_col.find(query).sort("follow_up_datetime", 1).limit(limit)
     docs = await cursor.to_list(length=limit)
+    serialized_docs = [serialize_follow_up(d) for d in docs]
 
-    return [serialize_follow_up(d) for d in docs]
+    return {
+        "success": True,
+        "data": serialized_docs,
+        "total": total_count
+    }
 
 
-@router.get("/stats")
+@router.get("/stats", include_in_schema=True)
+@router.get("/stats/", include_in_schema=False)
 async def get_follow_up_stats(
     agent_id: Optional[str] = Query(None),
     pool_id: Optional[str] = Query(None),
@@ -259,7 +267,7 @@ async def get_follow_up_stats(
     """
     Returns BPO Follow-Up KPI statistics for dashboard metric cards:
     - upcoming (Scheduled for future)
-    - due_now (Due right now)
+    - due (Due right now)
     - completed (Successfully linked/completed)
     - missed (Overdue / missed window)
     """
@@ -294,13 +302,24 @@ async def get_follow_up_stats(
         "status": "missed"
     })
 
+    total_kpi = upcoming_count + due_count + completed_count + missed_count
+
     return {
+        "success": True,
+        "stats": {
+            "total": total_kpi,
+            "upcoming": upcoming_count,
+            "due": due_count,
+            "completed": completed_count,
+            "missed": missed_count
+        },
+        # Also provide direct fields for maximum client compatibility
+        "total": total_kpi,
         "upcoming": upcoming_count,
-        "due_now": due_count,
         "due": due_count,
+        "due_now": due_count,
         "completed": completed_count,
-        "missed": missed_count,
-        "total": upcoming_count + due_count + completed_count + missed_count
+        "missed": missed_count
     }
 
 

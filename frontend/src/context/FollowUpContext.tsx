@@ -94,11 +94,19 @@ export function FollowUpProvider({ children }: { children: React.ReactNode }) {
     if (!user) return;
     try {
       const res: any = await api.get("/api/follow-ups/stats");
-      if (res && typeof res === "object" && "total" in res) {
-        setStats(res as FollowUpStats);
+      if (res && typeof res === "object") {
+        const s = res.stats || res;
+        setStats({
+          upcoming: s.upcoming || 0,
+          due_now: s.due || s.due_now || 0,
+          due: s.due || s.due_now || 0,
+          completed: s.completed || 0,
+          missed: s.missed || 0,
+          total: s.total || 0,
+        });
       }
-    } catch {
-      // silent fallback
+    } catch (err) {
+      console.warn("[FOLLOW-UP] Failed to fetch stats:", err);
     }
   }, [user]);
 
@@ -114,14 +122,12 @@ export function FollowUpProvider({ children }: { children: React.ReactNode }) {
         if (search) {
           url += `&search=${encodeURIComponent(search)}`;
         }
-        const data = await api.get(url);
-        if (Array.isArray(data)) {
-          setFollowUps(data);
-        } else {
-          setFollowUps([]);
-        }
+        const res: any = await api.get(url);
+        const list = Array.isArray(res) ? res : (Array.isArray(res?.data) ? res.data : []);
+        setFollowUps(list);
         await fetchStats();
-      } catch {
+      } catch (err) {
+        console.warn("[FOLLOW-UP] Failed to fetch follow-ups:", err);
         setFollowUps([]);
       } finally {
         setLoading(false);
