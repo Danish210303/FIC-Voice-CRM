@@ -347,6 +347,40 @@ class CallDispositionPayload(BaseModel):
     rating: Optional[int] = 5
 
 
+class FollowUpCreate(BaseModel):
+    customer_id: Optional[str] = None
+    lead_id: Optional[str] = None
+    customer_name: Optional[str] = None
+    customer_phone: str
+    agent_id: Optional[str] = None
+    pool_id: Optional[str] = None
+    follow_up_datetime: str  # ISO string or YYYY-MM-DD HH:MM
+    reason: Optional[str] = "Customer Callback Request"
+    notes: Optional[str] = None
+    time_zone: Optional[str] = "Asia/Kolkata"
+    priority: Optional[str] = "medium"  # low, medium, high, urgent
+    call_id: Optional[str] = None
+
+
+class FollowUpUpdate(BaseModel):
+    follow_up_datetime: Optional[str] = None
+    reason: Optional[str] = None
+    notes: Optional[str] = None
+    status: Optional[str] = None  # scheduled, due, completed, missed, cancelled
+    reschedule_reason: Optional[str] = None
+    priority: Optional[str] = None
+    agent_id: Optional[str] = None
+    pool_id: Optional[str] = None
+
+
+class FollowUpComplete(BaseModel):
+    call_id: Optional[str] = None
+    outcome: Optional[str] = "completed"
+    notes: Optional[str] = None
+    disposition: Optional[str] = None
+
+
+
 
 
 

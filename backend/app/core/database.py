@@ -45,11 +45,23 @@ attendance_breaks_col = db["attendance_breaks"]
 holidays_col = db["holidays"]
 call_recordings_col = db["call_recordings"]
 recordings_col = db["call_recordings"]  # Aliased for backward compatibility
+follow_ups_col = db["follow_ups"]        # BPO Scheduled Follow-Ups & Reminders
 
 
 async def init_indexes():
     """Ensure all indexes for MongoDB collections are created for high query performance."""
     try:
+        # Follow-Ups collection indexes
+        await follow_ups_col.create_index([("status", 1), ("follow_up_datetime", 1)])
+        await follow_ups_col.create_index("agent_id")
+        await follow_ups_col.create_index("customer_id")
+        await follow_ups_col.create_index("lead_id")
+        await follow_ups_col.create_index("pool_id")
+        await follow_ups_col.create_index("status")
+        await follow_ups_col.create_index("related_call_id")
+        await follow_ups_col.create_index([("created_at", -1)])
+        await follow_ups_col.create_index([("agent_id", 1), ("status", 1)])
+
         # Call Recordings collection indexes
         await call_recordings_col.create_index("call_id", unique=True)
         await call_recordings_col.create_index("lead_id")

@@ -1,15 +1,18 @@
 import { useEffect, useState, useCallback, useRef, useMemo } from "react";
 import { motion } from "framer-motion";
+import { useNavigate } from "react-router-dom";
 import { api } from "../api/client";
 import { useAuth } from "../context/AuthContext";
 import { useToast } from "../context/ToastContext";
 import { usePresence, getStatusBadgeDetails } from "../context/PresenceContext";
+import { useFollowUps } from "../context/FollowUpContext";
 import PauseBreakModal from "../components/PauseBreakModal";
 import ShiftSummaryModal from "../components/ShiftSummaryModal";
 import EarlyLogoutWarningModal from "../components/EarlyLogoutWarningModal";
 import TodayAttendanceCard from "../components/TodayAttendanceCard";
 import LiveAgentPoolModal from "../components/LiveAgentPoolModal";
 import UserCallHistorySection from "../components/UserCallHistorySection";
+import CreateFollowUpModal from "../components/CreateFollowUpModal";
 import {
   Users,
   Phone,
@@ -204,6 +207,9 @@ function DashboardSkeleton() {
 export default function Dashboard() {
   const { user } = useAuth();
   const { showToast } = useToast();
+  const navigate = useNavigate();
+  const { followUps, stats: followUpStats } = useFollowUps();
+  const [isScheduleFollowUpOpen, setIsScheduleFollowUpOpen] = useState(false);
   const {
     nowTicker,
     myStatus,
@@ -904,26 +910,110 @@ export default function Dashboard() {
             </div>
           </div>
 
-          <div className="lg:col-span-4 bg-white dark:bg-[#182233] border border-slate-200/80 dark:border-white/10 rounded-2xl p-5 shadow-2xs flex flex-col space-y-3">
-            <div className="flex items-center justify-between border-b border-slate-100 dark:border-white/10 pb-3">
-              <h3 className="text-base font-extrabold text-slate-900 dark:text-white">Shift Call History</h3>
-              <span className="text-xs text-slate-500 dark:text-slate-400 font-bold">{agentCallHistory.length} calls</span>
-            </div>
-            <div className="space-y-2 max-h-[380px] overflow-y-auto pr-1 softphone-scrollbar">
-              {filteredHistory.map((c) => (
-                <div key={c.id} className="p-3 rounded-xl bg-slate-50 dark:bg-slate-900/60 border border-slate-200/80 dark:border-white/10 flex items-center justify-between">
-                  <div>
-                    <div className="font-mono font-bold text-xs text-slate-900 dark:text-white">Call #{c.id.slice(-6).toUpperCase()}</div>
-                    <div className="text-[11px] text-slate-500 dark:text-slate-400 font-medium">Duration: {c.duration_seconds}s</div>
-                  </div>
-                  <span className="px-2 py-0.5 rounded text-[10px] font-extrabold uppercase bg-slate-200 dark:bg-slate-700 text-slate-700 dark:text-slate-200">
-                    {c.outcome}
-                  </span>
+          <div className="lg:col-span-4 flex flex-col gap-4">
+            {/* BPO Follow-Up Reminders Widget */}
+            <div className="bg-white dark:bg-[#182233] border border-slate-200/80 dark:border-white/10 rounded-2xl p-5 shadow-2xs flex flex-col space-y-3">
+              <div className="flex items-center justify-between border-b border-slate-100 dark:border-white/10 pb-3">
+                <div className="flex items-center gap-2">
+                  <Calendar className="h-4.5 w-4.5 text-blue-600 dark:text-blue-400" />
+                  <h3 className="text-base font-extrabold text-slate-900 dark:text-white">Follow-Up Reminders</h3>
                 </div>
-              ))}
+                <button
+                  onClick={() => navigate("/follow-ups")}
+                  className="text-xs font-bold text-blue-600 hover:text-blue-700 flex items-center gap-1 cursor-pointer"
+                >
+                  <span>View Hub</span>
+                  <ChevronRight className="h-3.5 w-3.5" />
+                </button>
+              </div>
+
+              {/* Mini Stats Bar */}
+              <div className="grid grid-cols-3 gap-2">
+                <div
+                  onClick={() => navigate("/follow-ups")}
+                  className="p-2 rounded-xl bg-amber-50 border border-amber-200 text-center cursor-pointer hover:bg-amber-100 transition"
+                >
+                  <div className="text-[10px] font-black uppercase text-amber-700">Due Now</div>
+                  <div className="text-lg font-black font-mono text-amber-900">{followUpStats.due_now || 0}</div>
+                </div>
+                <div
+                  onClick={() => navigate("/follow-ups")}
+                  className="p-2 rounded-xl bg-blue-50 border border-blue-200 text-center cursor-pointer hover:bg-blue-100 transition"
+                >
+                  <div className="text-[10px] font-black uppercase text-blue-700">Upcoming</div>
+                  <div className="text-lg font-black font-mono text-blue-900">{followUpStats.upcoming || 0}</div>
+                </div>
+                <div
+                  onClick={() => navigate("/follow-ups")}
+                  className="p-2 rounded-xl bg-rose-50 border border-rose-200 text-center cursor-pointer hover:bg-rose-100 transition"
+                >
+                  <div className="text-[10px] font-black uppercase text-rose-700">Missed</div>
+                  <div className="text-lg font-black font-mono text-rose-900">{followUpStats.missed || 0}</div>
+                </div>
+              </div>
+
+              {/* Quick List */}
+              <div className="space-y-2 max-h-[190px] overflow-y-auto pr-1 softphone-scrollbar">
+                {followUps.slice(0, 4).map((fu) => {
+                  const isDue = fu.status === "due";
+                  return (
+                    <div
+                      key={fu.id}
+                      className={`p-2.5 rounded-xl border flex items-center justify-between gap-2 transition ${
+                        isDue
+                          ? "bg-amber-50/80 border-amber-300"
+                          : "bg-slate-50 dark:bg-slate-900/60 border-slate-200/80 dark:border-white/10"
+                      }`}
+                    >
+                      <div className="truncate">
+                        <div className="font-extrabold text-xs text-slate-900 dark:text-white truncate">{fu.customer_name}</div>
+                        <div className="text-[10.5px] font-mono font-bold text-slate-500">{fu.customer_phone}</div>
+                        <div className="text-[10px] text-slate-400 truncate">{fu.reason}</div>
+                      </div>
+                      <button
+                        onClick={() => navigate(`/dialer?phone=${fu.customer_phone.replace(/\D/g, "")}&leadId=${fu.customer_id || fu.lead_id || ""}&name=${encodeURIComponent(fu.customer_name)}`)}
+                        className="h-7 px-2.5 rounded-lg bg-blue-600 hover:bg-blue-700 text-white font-bold text-[11px] flex items-center gap-1 shrink-0 transition active:scale-95 cursor-pointer shadow-2xs"
+                      >
+                        <Phone className="h-3 w-3" />
+                        <span>Dial</span>
+                      </button>
+                    </div>
+                  );
+                })}
+                {followUps.length === 0 && (
+                  <div className="py-4 text-center text-xs text-slate-400 font-medium">
+                    No active follow-ups scheduled.
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* Shift Call History */}
+            <div className="bg-white dark:bg-[#182233] border border-slate-200/80 dark:border-white/10 rounded-2xl p-5 shadow-2xs flex flex-col space-y-3">
+              <div className="flex items-center justify-between border-b border-slate-100 dark:border-white/10 pb-3">
+                <h3 className="text-base font-extrabold text-slate-900 dark:text-white">Shift Call History</h3>
+                <span className="text-xs text-slate-500 dark:text-slate-400 font-bold">{agentCallHistory.length} calls</span>
+              </div>
+              <div className="space-y-2 max-h-[220px] overflow-y-auto pr-1 softphone-scrollbar">
+                {filteredHistory.map((c) => (
+                  <div key={c.id} className="p-3 rounded-xl bg-slate-50 dark:bg-slate-900/60 border border-slate-200/80 dark:border-white/10 flex items-center justify-between">
+                    <div>
+                      <div className="font-mono font-bold text-xs text-slate-900 dark:text-white">Call #{c.id.slice(-6).toUpperCase()}</div>
+                      <div className="text-[11px] text-slate-500 dark:text-slate-400 font-medium">Duration: {c.duration_seconds}s</div>
+                    </div>
+                    <span className="px-2 py-0.5 rounded text-[10px] font-extrabold uppercase bg-slate-200 dark:bg-slate-700 text-slate-700 dark:text-slate-200">
+                      {c.outcome}
+                    </span>
+                  </div>
+                ))}
+              </div>
             </div>
           </div>
         </div>
+        <CreateFollowUpModal
+          isOpen={isScheduleFollowUpOpen}
+          onClose={() => setIsScheduleFollowUpOpen(false)}
+        />
         <PauseBreakModal
           isOpen={showPauseModal}
           onClose={() => setShowPauseModal(false)}

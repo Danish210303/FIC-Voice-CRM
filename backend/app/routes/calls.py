@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Body, status, Requ
 from fastapi.responses import PlainTextResponse, JSONResponse, Response
 # pyrefly: ignore [missing-import]
 from bson import ObjectId
-from app.core.database import calls_col, leads_col, users_col, audit_logs_col, campaigns_col, recordings_col, pools_col
+from app.core.database import calls_col, leads_col, users_col, audit_logs_col, campaigns_col, recordings_col, pools_col, follow_ups_col
 from app.core.utils import utcnow, oid_str, normalize_phone, gen_lead_id
 from app.core.deps import require_roles, get_current_user
 from app.core.http import get_http_client
@@ -30,6 +30,7 @@ from app.schemas.common import (
 )
 from app.services.ws_manager import ws_manager
 from app.services.cleanup_service import purge_expired_calls_and_recordings
+from app.services.follow_up_service import auto_link_follow_up_on_call_completed, parse_datetime_to_utc
 from app.routes.presence import record_call_completion, record_presence_change
 from app.routes.recordings import handle_call_recording_start, handle_call_recording_completed
 
@@ -2134,14 +2135,100 @@ async def record_call_disposition(call_id: str, payload: CallDispositionPayload,
     except Exception as e:
         logger.warning(f"[DISPOSITION RECORDING] Error processing recording: {e}")
     
+    # 1. Auto-link any existing/due follow-up task to this completed call
+    try:
+        await auto_link_follow_up_on_call_completed(
+            call_id=str(call_id),
+            agent_id=agent_id,
+            phone=call.get("phone") or "",
+            lead_id=str(call.get("lead_id")) if call.get("lead_id") else None,
+            outcome=payload.disposition,
+            notes=payload.notes
+        )
+    except Exception as fe:
+        logger.warning(f"[DISPOSITION FOLLOW-UP LINK] {fe}")
+
+    # 2. Automatically create a scheduled Follow-Up if agent requested follow-up / callback
+    if payload.follow_up_date or payload.disposition in ["follow_up_required", "call_back"]:
+        try:
+            fu_time_str = f"{payload.follow_up_date} {payload.follow_up_time}".strip() if payload.follow_up_time else (payload.follow_up_date or "")
+            fu_dt = parse_datetime_to_utc(fu_time_str) if fu_time_str else (utcnow() + timedelta(hours=24))
+            
+            cust_name = "Customer"
+            cust_phone = normalize_phone(call.get("phone") or "")
+            pool_id = str(call.get("pool_id") or "general")
+            pool_name = "Customer Support"
+
+            if call.get("lead_id"):
+                lead_oid = _safe_oid(call["lead_id"])
+                if lead_oid:
+                    lead_doc = await leads_col.find_one({"_id": lead_oid})
+                    if lead_doc:
+                        cust_name = lead_doc.get("name") or cust_name
+                        cust_phone = normalize_phone(lead_doc.get("phone") or cust_phone)
+                        pool_id = str(lead_doc.get("pool_id") or pool_id)
+
+            if pool_id and pool_id != "general":
+                pool_oid = _safe_oid(pool_id)
+                if pool_oid:
+                    p_doc = await pools_col.find_one({"_id": pool_oid})
+                    if p_doc:
+                        pool_name = p_doc.get("name") or pool_name
+
+            agent_user = await users_col.find_one({"$or": [{"_id": _safe_oid(agent_id)}, {"id": agent_id}]}) if agent_id else None
+            agent_name = agent_user.get("name", "Agent") if agent_user else "Agent"
+            agent_emp_id = agent_user.get("employee_id", "") if agent_user else ""
+
+            fu_doc = {
+                "customer_id": str(call.get("lead_id") or call.get("phone") or utcnow().timestamp()),
+                "lead_id": str(call.get("lead_id")) if call.get("lead_id") else None,
+                "customer_name": cust_name,
+                "customer_phone": cust_phone,
+                "agent_id": agent_id,
+                "agent_name": agent_name,
+                "agent_employee_id": agent_emp_id,
+                "pool_id": pool_id,
+                "pool_name": pool_name,
+                "follow_up_datetime": fu_dt,
+                "reason": payload.notes or f"Follow-up after call ({payload.disposition.replace('_', ' ').title()})",
+                "notes": payload.notes or "",
+                "status": "due" if fu_dt <= utcnow() else "scheduled",
+                "priority": "medium",
+                "time_zone": "Asia/Kolkata",
+                "related_call_id": str(call_id),
+                "created_by": agent_id,
+                "created_at": utcnow(),
+                "updated_at": utcnow()
+            }
+            ins_fu = await follow_ups_col.insert_one(fu_doc)
+            fu_doc["_id"] = ins_fu.inserted_id
+            
+            await ws_manager.broadcast_global({
+                "event": "FOLLOW_UP_CREATED",
+                "type": "follow_up_created",
+                "follow_up_id": str(ins_fu.inserted_id),
+                "id": str(ins_fu.inserted_id),
+                "customer_name": cust_name,
+                "customer_phone": cust_phone,
+                "agent_id": agent_id,
+                "status": fu_doc["status"],
+                "scheduled_datetime": fu_dt.isoformat(),
+                "timestamp": utcnow().isoformat()
+            })
+            logger.info(f"[DISPOSITION] Created Follow-Up #{ins_fu.inserted_id} for {cust_name} ({cust_phone})")
+        except Exception as fue:
+            logger.warning(f"[DISPOSITION FOLLOW-UP CREATE WARNING] {fue}")
+
     if call.get("lead_id"):
         try:
+            lead_status = "completed" if payload.disposition in ["resolved", "closed", "converted"] else "follow_up_required" if (payload.follow_up_date or payload.disposition in ["follow_up_required", "call_back"]) else "in_progress"
             await leads_col.update_one(
                 {"_id": ObjectId(call["lead_id"])},
                 {"$set": {
-                    "status": "completed" if payload.disposition in ["resolved", "closed", "converted"] else "in_progress",
+                    "status": lead_status,
                     "last_disposition": payload.disposition,
-                    "notes": payload.notes
+                    "notes": payload.notes,
+                    "follow_up_date": payload.follow_up_date
                 }}
             )
         except Exception:

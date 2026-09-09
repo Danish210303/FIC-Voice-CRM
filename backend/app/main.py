@@ -10,13 +10,15 @@ from fastapi.middleware.gzip import GZipMiddleware
 from app.core.config import settings
 from app.core.database import init_indexes, check_db_connection
 from app.core.http import get_http_client, close_http_client
-from app.routes import auth, users, pools, campaigns, leads, calls, leave, reports, ws, ai_agents, presence, attendance, recordings
+from app.routes import auth, users, pools, campaigns, leads, calls, leave, reports, ws, ai_agents, presence, attendance, recordings, follow_ups
 from app.services.cleanup_service import purge_expired_calls_and_recordings
+from app.services.follow_up_service import start_periodic_follow_up_job
 
 # ── Logging ──────────────────────────────────────────────────────────────────
 logger = logging.getLogger("uvicorn.error")
 
 _cleanup_task = None
+_followup_task = None
 
 
 async def start_periodic_cleanup_job():
@@ -131,6 +133,7 @@ app.include_router(presence.session_router)
 app.include_router(presence.root_session_router)
 app.include_router(attendance.router)
 app.include_router(recordings.router)
+app.include_router(follow_ups.router)
 
 
 # ── Startup ──────────────────────────────────────────────────────────────────
@@ -217,18 +220,23 @@ async def on_startup():
         logger.info("Vapi AI Configuration: All required credentials loaded successfully.")
 
     # Start persistent 24-hour retention cleanup background job (runs every 10 min)
-    global _cleanup_task
+    global _cleanup_task, _followup_task
     _cleanup_task = asyncio.create_task(start_periodic_cleanup_job())
+    # Start persistent BPO follow-up evaluation job (runs every 15 sec)
+    _followup_task = asyncio.create_task(start_periodic_follow_up_job())
     # Run immediate pass on startup
     asyncio.create_task(purge_expired_calls_and_recordings(retention_hours=24.0))
 
 
 @app.on_event("shutdown")
 async def on_shutdown():
-    global _cleanup_task
+    global _cleanup_task, _followup_task
     if _cleanup_task and not _cleanup_task.done():
         _cleanup_task.cancel()
+    if _followup_task and not _followup_task.done():
+        _followup_task.cancel()
     await close_http_client()
+
 
 
 # ── Health & Root ────────────────────────────────────────────────────────────

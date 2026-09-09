@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 import { NavLink, Outlet, useLocation } from "react-router-dom";
 import { useAuth } from "../context/AuthContext";
+import { useFollowUps } from "../context/FollowUpContext";
 import ForgeLogo from "./ForgeLogo";
 import GalaxyBackground3D from "./GalaxyBackground3D";
 import { assets } from "../utils/assets";
@@ -21,7 +22,8 @@ import {
   Activity,
   RefreshCw,
   Bot,
-  FileAudio
+  FileAudio,
+  Calendar
 } from "lucide-react";
 
 type NavGroup = {
@@ -31,6 +33,7 @@ type NavGroup = {
 
 export default function Layout() {
   const { user, logout } = useAuth();
+  const { stats } = useFollowUps();
   const location = useLocation();
   const [isMobileOpen, setIsMobileOpen] = useState(false);
 
@@ -77,6 +80,17 @@ export default function Layout() {
   const role = user?.role || "admin";
 
   const getNavGroups = (): NavGroup[] => {
+    const followUpBadge =
+      stats.due_now > 0 ? (
+        <span className="ml-auto px-2 py-0.5 rounded-full text-[10px] font-black bg-amber-500 text-white animate-pulse">
+          {stats.due_now} DUE
+        </span>
+      ) : stats.upcoming > 0 ? (
+        <span className="ml-auto px-1.5 py-0.2 rounded-full text-[10px] font-bold bg-blue-100 text-blue-700">
+          {stats.upcoming}
+        </span>
+      ) : undefined;
+
     if (role === "admin") {
       return [
         {
@@ -85,6 +99,7 @@ export default function Layout() {
             { to: "/", label: "Dashboard", icon: <LayoutGrid className="h-5 w-5" /> },
             { to: "/campaigns", label: "Campaigns", icon: <Megaphone className="h-5 w-5" /> },
             { to: "/leads", label: "Lead Management", icon: <Users className="h-5 w-5" /> },
+            { to: "/follow-ups", label: "Follow-Up Tasks", icon: <Calendar className="h-5 w-5" />, badge: followUpBadge },
             {
               to: "/live-calls",
               label: "Live Calls",
@@ -117,6 +132,7 @@ export default function Layout() {
             { to: "/", label: "Dashboard", icon: <LayoutGrid className="h-5 w-5" /> },
             { to: "/campaigns", label: "Campaigns", icon: <Megaphone className="h-5 w-5" /> },
             { to: "/leads", label: "Lead Management", icon: <Users className="h-5 w-5" /> },
+            { to: "/follow-ups", label: "Follow-Up Tasks", icon: <Calendar className="h-5 w-5" />, badge: followUpBadge },
             {
               to: "/live-calls",
               label: "Live Calls",
@@ -148,6 +164,7 @@ export default function Layout() {
           items: [
             { to: "/", label: "Dashboard", icon: <LayoutGrid className="h-5 w-5" /> },
             { to: "/leads", label: "My Assigned Leads", icon: <Users className="h-5 w-5" /> },
+            { to: "/follow-ups", label: "My Follow-Ups", icon: <Calendar className="h-5 w-5" />, badge: followUpBadge },
             { to: "/dialer", label: "Softphone Dialer", icon: <Phone className="h-5 w-5" /> },
             { to: "/campaigns", label: "Campaigns", icon: <Megaphone className="h-5 w-5" /> },
             { to: "/reports", label: "Call Logs", icon: <History className="h-5 w-5" /> },

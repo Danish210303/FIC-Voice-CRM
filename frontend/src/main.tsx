@@ -5,6 +5,7 @@ import App from "./App";
 import { AuthProvider } from "./context/AuthContext";
 import { ToastProvider } from "./context/ToastContext";
 import { PresenceProvider } from "./context/PresenceContext";
+import { FollowUpProvider } from "./context/FollowUpContext";
 import "./index.css";
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
@@ -13,7 +14,9 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
       <AuthProvider>
         <PresenceProvider>
           <ToastProvider>
-            <App />
+            <FollowUpProvider>
+              <App />
+            </FollowUpProvider>
           </ToastProvider>
         </PresenceProvider>
       </AuthProvider>

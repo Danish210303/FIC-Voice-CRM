@@ -13,6 +13,8 @@ import Dialer from "./pages/Dialer";
 import Quality from "./pages/Quality";
 import AIAgents from "./pages/AIAgents";
 import Recordings from "./pages/Recordings";
+import FollowUps from "./pages/FollowUps";
+import DueFollowUpAlert from "./components/DueFollowUpAlert";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { DesktopTitleBar } from "./components/DesktopTitleBar";
 
@@ -117,6 +119,14 @@ export default function App() {
           }
         />
         <Route
+          path="follow-ups"
+          element={
+            <ProtectedRoute roles={["admin", "team_leader", "agent"]}>
+              <FollowUps />
+            </ProtectedRoute>
+          }
+        />
+        <Route
           path="dialer"
           element={
             <ProtectedRoute roles={["admin", "team_leader", "agent"]}>
@@ -126,6 +136,7 @@ export default function App() {
         />
       </Route>
     </Routes>
+          <DueFollowUpAlert />
         </div>
       </div>
     </ErrorBoundary>
