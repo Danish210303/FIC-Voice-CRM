@@ -770,6 +770,15 @@ export default function Dialer() {
         const cleanPhone = (data.phone || "9876543210").replace(/\D/g, "").slice(-10);
         if (data.call_id) setCurrentCallId(data.call_id);
         setOutboundPhone(cleanPhone);
+        if (data.lead_id || data.customer_name) {
+          setSelectedLead({
+            _id: data.lead_id || `lead_${Date.now()}`,
+            name: data.customer_name || "Customer Lead",
+            phone: cleanPhone,
+            status: "in_call",
+            pool_id: data.pool_id || "general"
+          });
+        }
         setDialerMode("outbound");
         setCallStatus("connected");
         setAgentStatus("on_call");

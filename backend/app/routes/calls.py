@@ -2188,24 +2188,57 @@ async def record_call_disposition(call_id: str, payload: CallDispositionPayload,
             agent_name = agent_user.get("name", "Agent") if agent_user else "Agent"
             agent_emp_id = agent_user.get("employee_id", "") if agent_user else ""
 
+            initial_timeline = [
+                {
+                    "id": f"evt_{uuid.uuid4().hex[:8]}",
+                    "timestamp": utcnow().isoformat(),
+                    "action": "FOLLOW_UP_SCHEDULED",
+                    "description": f"Callback scheduled for {fu_dt.strftime('%d %b %Y, %I:%M %p IST')} ({payload.notes or payload.disposition.replace('_', ' ').title()})",
+                    "actor": agent_name,
+                    "actor_role": "Agent",
+                    "metadata": {
+                        "scheduled_datetime": fu_dt.isoformat(),
+                        "agent_id": agent_id,
+                        "agent_name": agent_name,
+                        "pool_id": pool_id,
+                        "pool_name": pool_name,
+                        "original_call_id": str(call_id)
+                    }
+                }
+            ]
+
             fu_status = "due" if fu_dt <= utcnow() else "scheduled"
             fu_doc = {
                 "customer_id": str(call.get("lead_id") or call.get("phone") or utcnow().timestamp()),
                 "lead_id": str(call.get("lead_id")) if call.get("lead_id") else None,
                 "customer_name": cust_name,
                 "customer_phone": cust_phone,
+                "phone_number": cust_phone,
+                "original_agent_id": agent_id,
+                "original_agent_name": agent_name,
+                "current_agent_id": agent_id,
+                "current_agent_name": agent_name,
+                "assigned_agent_id": agent_id,
+                "assigned_agent_name": agent_name,
                 "agent_id": agent_id,
                 "agent_name": agent_name,
                 "agent_employee_id": agent_emp_id,
                 "pool_id": pool_id,
                 "pool_name": pool_name,
+                "scheduled_at": fu_dt,
                 "follow_up_datetime": fu_dt,
                 "reason": payload.notes or f"Follow-up after call ({payload.disposition.replace('_', ' ').title()})",
                 "notes": payload.notes or "",
                 "status": fu_status,
                 "priority": "medium",
                 "time_zone": "Asia/Kolkata",
+                "original_call_id": str(call_id),
                 "related_call_id": str(call_id),
+                "timeline": initial_timeline,
+                "attempts": [],
+                "call_attempts_count": 0,
+                "is_locked": False,
+                "lock_timestamp": None,
                 "created_by": agent_id,
                 "created_at": utcnow(),
                 "updated_at": utcnow()
@@ -3668,150 +3701,7 @@ async def get_current_active_call(user: dict = Depends(get_current_user)):
     }
 
 
-@router.post("/{call_id}/disposition", dependencies=[Depends(require_roles(Role.ADMIN, Role.TEAM_LEADER, Role.AGENT))])
-async def record_call_disposition(call_id: str, payload: CallDispositionPayload, user: dict = Depends(get_current_user)):
-    """
-    Submits call disposition, ends wrap-up timer, marks call completed, and returns agent to READY.
-    """
-    query = {"_id": ObjectId(call_id)} if ObjectId.is_valid(call_id) else {"_id": call_id}
-    call = await calls_col.find_one(query)
-    if not call:
-        call = await calls_col.find_one({"id": call_id})
-    if not call:
-        return {"status": "success", "message": "Call disposition noted", "call_id": call_id}
 
-    now_utc = utcnow()
-    now_iso = now_utc.isoformat()
-
-    # Calculate wrap-up time
-    wrap_sec = 0
-    if call.get("wrap_up_started_at"):
-        try:
-            w_dt = call["wrap_up_started_at"] if isinstance(call["wrap_up_started_at"], datetime) else datetime.fromisoformat(str(call["wrap_up_started_at"]).replace("Z", "+00:00"))
-            wrap_sec = max(0, int((now_utc.replace(tzinfo=None) - w_dt.replace(tzinfo=None)).total_seconds()))
-        except Exception:
-            pass
-
-    duration_sec = call.get("duration_seconds") or payload.duration_seconds or 0
-
-    update = {
-        "status": "completed",
-        "call_status": "completed",
-        "disposition": payload.disposition,
-        "outcome": payload.disposition,
-        "wrap_up_completed_at": now_utc,
-        "disposition_completed_at": now_iso,
-        "wrap_up_seconds": wrap_sec,
-        "dispose_seconds": wrap_sec,
-        "disposeDurationSeconds": wrap_sec,
-        "duration_seconds": duration_sec,
-        "notes": payload.notes or call.get("notes", "")
-    }
-    if payload.follow_up_date:
-        update["follow_up_date"] = payload.follow_up_date
-    if payload.follow_up_time:
-        update["follow_up_time"] = payload.follow_up_time
-
-    disp_title = f"Agent Updated Disposition ({payload.disposition.replace('_', ' ').title()})"
-    disp_desc = f"Status set to: {payload.disposition.replace('_', ' ').title()}" + (f" • Notes: {payload.notes}" if payload.notes else "")
-    disp_event = {
-        "id": f"evt_disp_{now_utc.timestamp()}",
-        "timestamp": now_utc.strftime("%I:%M:%S %p"),
-        "title": disp_title,
-        "description": disp_desc,
-        "dotColor": "bg-purple-500 ring-4 ring-purple-100 dark:ring-purple-900/30",
-        "type": "disposition",
-        "created_at": now_iso
-    }
-
-    await calls_col.update_one({"_id": call["_id"]}, {
-        "$set": update,
-        "$push": {"events": disp_event}
-    })
-
-    agent_id = str(call.get("agent_id") or _uid(user))
-
-    # Update Lead status if linked
-    if call.get("lead_id"):
-        try:
-            lead_status = "closed" if payload.disposition in ["interested", "converted", "not_interested", "dnc"] else "follow_up_required" if payload.disposition in ["call_back", "follow_up_required"] else "in_progress"
-            lead_query = {"_id": ObjectId(call["lead_id"])} if ObjectId.is_valid(call["lead_id"]) else {"_id": call["lead_id"]}
-            await leads_col.update_one(
-                lead_query,
-                {"$set": {
-                    "status": lead_status,
-                    "last_disposition": payload.disposition,
-                    "notes": payload.notes or call.get("notes", ""),
-                    "follow_up_date": payload.follow_up_date
-                }}
-            )
-        except Exception as le:
-            logger.warning(f"[DISPOSITION LEAD UPDATE] {le}")
-
-    # Finalize recording metadata if present
-    try:
-        await handle_call_recording_completed(
-            call_id=str(call["_id"]),
-            duration_seconds=duration_sec,
-            outcome=payload.disposition,
-            notes=payload.notes,
-            ai_summary=call.get("ai_summary"),
-            transcript=call.get("transcript"),
-            lead_id=str(call.get("lead_id")) if call.get("lead_id") else None,
-            agent_id=agent_id,
-            phone=call.get("phone"),
-            pool_id=call.get("pool_id")
-        )
-    except Exception as re:
-        logger.warning(f"[DISPOSITION RECORDING] {re}")
-
-    if agent_id:
-        try:
-            await record_call_completion(user_id=agent_id, duration_seconds=duration_sec, dispose_seconds=wrap_sec, call_id=str(call["_id"]), outcome=payload.disposition)
-            await record_presence_change(user_id=agent_id, new_status="ready")
-            agent_oid = _safe_oid(agent_id)
-            if agent_oid:
-                await users_col.update_one(
-                    {"_id": agent_oid},
-                    {"$unset": {"currentCallId": "", "dispositionStartedAt": ""}}
-                )
-        except Exception as pe:
-            logger.warning(f"[DISPOSITION PRESENCE] {pe}")
-
-    ws_payload = {
-        "event": "CALL_DISPOSITION_SAVED",
-        "call_id": call_id,
-        "agent_id": agent_id,
-        "disposition": payload.disposition,
-        "wrap_up_completed_at": now_iso,
-        "wrap_up_seconds": wrap_sec,
-        "dispose_seconds": wrap_sec
-    }
-    await ws_manager.broadcast("global", ws_payload)
-    await ws_manager.broadcast_global({
-        "event": "agent.wrapup.completed",
-        "agentId": agent_id,
-        "callId": call_id,
-        "status": "READY",
-        "disposition": payload.disposition,
-        "disposeDurationSeconds": wrap_sec,
-        "timestamp": now_iso
-    })
-    await ws_manager.broadcast_global({
-        "event": "CALL_COMPLETED",
-        "call_id": call_id,
-        "agent_id": agent_id,
-        "status": "completed",
-        "disposition": payload.disposition
-    })
-
-    return {
-        "status": "success",
-        "call_id": call_id,
-        "disposition": payload.disposition,
-        "wrap_up_seconds": wrap_sec,
-        "agent_status": "ready"
-    }
 
 
 @router.post("/{call_id}/dtmf", dependencies=[Depends(require_roles(Role.ADMIN, Role.TEAM_LEADER, Role.AGENT))])
