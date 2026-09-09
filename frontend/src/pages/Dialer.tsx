@@ -329,22 +329,38 @@ export default function Dialer() {
       if (state) setWebrtcState(state);
       if (diagnostics) setMediaDiagnostics(diagnostics);
 
-      if (state === "CONNECTED" && callStatusRef.current === "answering") {
+      if ((state === "CONNECTED" || state === "CONNECTING_MEDIA") && (callStatusRef.current === "answering" || callStatusRef.current === "dialing" || callStatusRef.current === "ringing")) {
         setCallStatus("connecting_media");
-        console.log("[PLIVO] CALL ANSWERED");
-        console.log("[PLIVO] MEDIA CONNECTING");
+        console.log("[PLIVO] CALL ANSWERED - MEDIA CONNECTING");
       }
-      if (state === "MEDIA_CONNECTED" && (callStatusRef.current === "answering" || callStatusRef.current === "connecting_media")) {
+      if (state === "MEDIA_CONNECTED" && (callStatusRef.current === "answering" || callStatusRef.current === "connecting_media" || callStatusRef.current === "dialing" || callStatusRef.current === "ringing")) {
         setCallStatus("connected");
         setAgentStatus("on_call");
         if (!answeredStartTimeRef.current) answeredStartTimeRef.current = Date.now();
         setCallDuration(0);
         setRingingDuration(0);
-        console.log("[PLIVO] MEDIA CONNECTED");
+        console.log("[PLIVO] MEDIA CONNECTED - AUDIO STREAM LIVE");
+      }
+      if (state === "HOLD") {
+        setCallStatus("hold");
+      } else if (state === "RESUMED") {
+        setCallStatus("connected");
+      }
+    };
+
+    const handleMediaConnected = (e: any) => {
+      console.log("[PLIVO] WebRTC media stream active:", e.detail);
+      if (callStatusRef.current !== "wrapup" && callStatusRef.current !== "completed" && callStatusRef.current !== "ready") {
+        setCallStatus("connected");
+        setAgentStatus("on_call");
+        if (!answeredStartTimeRef.current) answeredStartTimeRef.current = Date.now();
+        setCallDuration(0);
+        setRingingDuration(0);
       }
     };
 
     window.addEventListener("plivo_webrtc_state_change", handleWebRTCState);
+    window.addEventListener("plivo_webrtc_media_connected", handleMediaConnected);
 
     plivoWebRTC.getAudioDevices().then(({ inputs, outputs }) => {
       setAudioInputDevices(inputs);
@@ -357,6 +373,7 @@ export default function Dialer() {
 
     return () => {
       window.removeEventListener("plivo_webrtc_state_change", handleWebRTCState);
+      window.removeEventListener("plivo_webrtc_media_connected", handleMediaConnected);
     };
   }, []);
 
@@ -1573,8 +1590,8 @@ export default function Dialer() {
     setIsMuteLoading(true);
     setIsMuted(nextMuted);
 
-    // Plivo-only: mic mute is handled via the backend mute action API.
-    // Local WebRTC stream is not available since we use Plivo PSTN.
+    // Apply directly to WebRTC microphone audio tracks
+    plivoWebRTC.setMuted(nextMuted);
 
     pushCallTimelineEvent(
       "mute",
@@ -1611,6 +1628,9 @@ export default function Dialer() {
     setIsHoldLoading(true);
     setIsHoldProcessing(true);
 
+    // Apply directly to WebRTC audio pipeline
+    plivoWebRTC.setHold(!isCurrentlyHold);
+
     try {
       if (currentCallId) {
         await api.post(`/api/calls/${currentCallId}/manual-action`, {
@@ -1628,6 +1648,7 @@ export default function Dialer() {
       showToast(isCurrentlyHold ? "Call Resumed" : "Call Placed on Hold", "success");
     } catch (err: any) {
       setCallStatus(prevStatus);
+      plivoWebRTC.setHold(isCurrentlyHold);
       showToast(err.message || `Failed to ${targetAction} call session`, "error");
     } finally {
       setIsHoldLoading(false);
@@ -1638,7 +1659,8 @@ export default function Dialer() {
   const handleToggleSpeaker = useCallback(() => {
     const nextSpeaker = !isSpeaker;
     setIsSpeaker(nextSpeaker);
-    showToast(nextSpeaker ? "Speaker Output Enabled" : "Default Earpiece Enabled", "info");
+    plivoWebRTC.setSpeakerMuted(!nextSpeaker);
+    showToast(nextSpeaker ? "Speaker Output Enabled" : "Speaker Output Muted", "info");
   }, [isSpeaker]);
 
   const handleTransferCall = async () => {
@@ -2825,7 +2847,7 @@ export default function Dialer() {
 
                             <button
                               type="button"
-                              onClick={() => setIsSpeaker(!isSpeaker)}
+                              onClick={handleToggleSpeaker}
                               className={`p-2.5 rounded-xl border flex flex-col items-center justify-center gap-1 transition active:scale-95 cursor-pointer ${
                                 isSpeaker
                                   ? "bg-blue-600 text-white border-blue-700 shadow-xs"

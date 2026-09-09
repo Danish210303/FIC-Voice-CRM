@@ -265,22 +265,18 @@ async def plivo_answer_webhook(request: Request):
             plivo_xml = (
                 '<?xml version="1.0" encoding="UTF-8"?>\n'
                 '<Response>\n'
-                f'    <Record action="{record_callback_url}" method="POST" startOnDialAnswer="true" redirect="false" maxLength="3600" fileFormat="wav"/>\n'
                 f'    <Dial callerId="{plivo_caller_id}" timeout="45">\n'
                 f'        <User>{target_to_dial}</User>\n'
                 '    </Dial>\n'
-                '    <Wait length="3600"/>\n'
                 '</Response>'
             )
         else:
             plivo_xml = (
                 '<?xml version="1.0" encoding="UTF-8"?>\n'
                 '<Response>\n'
-                f'    <Record action="{record_callback_url}" method="POST" startOnDialAnswer="true" redirect="false" maxLength="3600" fileFormat="wav"/>\n'
                 f'    <Dial callerId="{plivo_caller_id}" timeout="45">\n'
                 f'        <Number>{dial_digits}</Number>\n'
                 '    </Dial>\n'
-                '    <Wait length="3600"/>\n'
                 '</Response>'
             )
     else:
@@ -309,7 +305,6 @@ async def plivo_answer_webhook(request: Request):
                 plivo_xml = (
                     '<?xml version="1.0" encoding="UTF-8"?>\n'
                     '<Response>\n'
-                    f'    <Record action="{record_callback_url}" method="POST" startOnDialAnswer="true" redirect="false" maxLength="3600" fileFormat="wav"/>\n'
                     f'    <Dial callerId="{plivo_caller_id}" timeout="45">\n'
                     f'        <User>{sip_uri}</User>\n'
                     '    </Dial>\n'
@@ -346,7 +341,6 @@ async def ivr_callback(request: Request):
     base_url = getattr(settings, "BASE_URL", "") or str(request.base_url).rstrip("/")
     if "localhost" in base_url or "127.0.0.1" in base_url:
         base_url = str(request.base_url).rstrip("/")
-    record_callback_url = f"{base_url}/api/calls/plivo/recording-callback"
     
     if digits == "1":
         # Sales
@@ -354,7 +348,6 @@ async def ivr_callback(request: Request):
         plivo_xml = (
             '<?xml version="1.0" encoding="UTF-8"?>\n'
             '<Response>\n'
-            f'    <Record action="{record_callback_url}" method="POST" startOnDialAnswer="true" redirect="false" maxLength="3600" fileFormat="wav"/>\n'
             f'    <Dial callerId="{plivo_caller_id}" timeout="45">\n'
             f'        <Number>{target_number}</Number>\n'
             '    </Dial>\n'
@@ -366,7 +359,6 @@ async def ivr_callback(request: Request):
         plivo_xml = (
             '<?xml version="1.0" encoding="UTF-8"?>\n'
             '<Response>\n'
-            f'    <Record action="{record_callback_url}" method="POST" startOnDialAnswer="true" redirect="false" maxLength="3600" fileFormat="wav"/>\n'
             f'    <Dial callerId="{plivo_caller_id}" timeout="45">\n'
             f'        <Number>{target_number}</Number>\n'
             '    </Dial>\n'

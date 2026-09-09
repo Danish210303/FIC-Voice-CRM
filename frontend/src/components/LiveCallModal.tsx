@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from "react";
 import { CustomSelect } from "./CustomSelect";
 import { CustomPauseIcon } from "./CustomPauseIcon";
+import { plivoWebRTC } from "../services/plivoWebRTC";
 import {
   Mic,
   MicOff,
@@ -669,8 +670,10 @@ export default function LiveCallModal({
 
                 <button
                   onClick={() => {
-                    setIsSpeakerActive(!isSpeakerActive);
-                    showToast(`Speaker Audio: ${!isSpeakerActive ? "ON" : "OFF"}`, "info");
+                    const next = !isSpeakerActive;
+                    setIsSpeakerActive(next);
+                    plivoWebRTC.setSpeakerMuted(!next);
+                    showToast(`Speaker Audio: ${next ? "ON" : "OFF"}`, "info");
                   }}
                   className={`py-2.5 px-3 rounded-xl text-xs font-extrabold transition flex items-center justify-center gap-2 ${
                     isSpeakerActive
