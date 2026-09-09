@@ -777,7 +777,7 @@ export default function Dialer() {
             phone: cleanPhone,
             status: "in_call",
             pool_id: data.pool_id || "general"
-          });
+          } as any);
         }
         setDialerMode("outbound");
         setCallStatus("connected");

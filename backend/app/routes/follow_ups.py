@@ -15,7 +15,9 @@ from app.services.follow_up_service import (
     parse_datetime_to_utc,
     evaluate_follow_ups,
     initiate_auto_callback_for_agent,
-    record_follow_up_timeline_event
+    record_follow_up_timeline_event,
+    format_ist_datetime_str,
+    utc_to_ist
 )
 
 logger = logging.getLogger("uvicorn.error")
@@ -38,17 +40,23 @@ def _safe_oid(oid_val: str | None) -> ObjectId | None:
 
 
 def serialize_follow_up(fu: Dict[str, Any]) -> Dict[str, Any]:
-    """Helper to convert MongoDB follow_up document into a clean JSON response with full timeline."""
+    """Helper to convert MongoDB follow_up document into a clean JSON response with full timeline and strict IST timezone strings."""
     fu_id = str(fu["_id"]) if "_id" in fu else str(fu.get("id", ""))
     
-    # Format ISO strings safely
+    # Format ISO strings safely in explicit UTC
     fu_dt = fu.get("follow_up_datetime") or fu.get("scheduled_at")
     if isinstance(fu_dt, datetime):
+        if fu_dt.tzinfo is None:
+            fu_dt = fu_dt.replace(tzinfo=timezone.utc)
         fu_dt_iso = fu_dt.isoformat()
     elif fu_dt:
         fu_dt_iso = str(fu_dt)
+        if not fu_dt_iso.endswith("Z") and "+" not in fu_dt_iso and "-" not in fu_dt_iso[10:]:
+            fu_dt_iso = f"{fu_dt_iso}Z"
     else:
         fu_dt_iso = ""
+
+    formatted_ist = format_ist_datetime_str(fu_dt) if fu_dt else ""
 
     created_at = fu.get("created_at")
     created_at_iso = created_at.isoformat() if isinstance(created_at, datetime) else str(created_at or "")
@@ -91,11 +99,14 @@ def serialize_follow_up(fu: Dict[str, Any]) -> Dict[str, Any]:
         "pool_name": fu.get("pool_name") or "Customer Support",
         "scheduled_at": fu_dt_iso,
         "follow_up_datetime": fu_dt_iso,
+        "scheduled_at_ist": formatted_ist,
+        "follow_up_datetime_ist": formatted_ist,
+        "formatted_ist": formatted_ist,
         "reason": fu.get("reason") or "Follow-Up Call",
         "notes": fu.get("notes") or "",
         "status": fu.get("status") or "scheduled",
         "priority": fu.get("priority") or "medium",
-        "time_zone": fu.get("time_zone") or "Asia/Kolkata",
+        "time_zone": "Asia/Kolkata",
         "original_call_id": str(fu.get("original_call_id") or fu.get("related_call_id") or ""),
         "related_call_id": str(fu.get("related_call_id") or fu.get("original_call_id") or ""),
         "timeline": timeline_raw,

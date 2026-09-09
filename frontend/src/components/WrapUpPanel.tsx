@@ -10,6 +10,7 @@ import {
   AlertCircle,
   User
 } from "lucide-react";
+import { getCurrentISTInputs } from "../utils/dateUtils";
 
 export interface WrapUpLead {
   _id?: string;
@@ -117,7 +118,7 @@ export const WrapUpPanel: React.FC<WrapUpPanelProps> = ({
 
   const displayPhone = maskedPhone || phone || "Unknown Phone";
   const displayName = lead?.name || "Customer Lead";
-  const todayStr = new Date().toISOString().split("T")[0];
+  const todayStr = getCurrentISTInputs().date;
 
   return (
     <div className="w-full bg-white dark:bg-[#0f172a] rounded-xl border border-slate-200 dark:border-slate-800 shadow-sm p-3.5 sm:p-4 space-y-3 font-sans transition-all">

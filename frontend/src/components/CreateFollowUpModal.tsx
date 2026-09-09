@@ -3,6 +3,7 @@ import { motion, AnimatePresence } from "framer-motion";
 import { useFollowUps } from "../context/FollowUpContext";
 import { useAuth } from "../context/AuthContext";
 import { Calendar, Clock, X, User, Phone, Tag, AlignLeft, Shield, Sparkles, Check } from "lucide-react";
+import { getCurrentISTInputs } from "../utils/dateUtils";
 
 interface CreateFollowUpModalProps {
   isOpen: boolean;
@@ -18,34 +19,28 @@ interface CreateFollowUpModalProps {
 }
 
 const PRESET_OPTIONS = [
-  { label: "+15 Min", getIso: () => new Date(Date.now() + 15 * 60 * 1000).toISOString() },
-  { label: "+1 Hour", getIso: () => new Date(Date.now() + 60 * 60 * 1000).toISOString() },
-  { label: "+3 Hours", getIso: () => new Date(Date.now() + 3 * 60 * 60 * 1000).toISOString() },
+  { label: "+15 Min", getInputs: () => getCurrentISTInputs(15) },
+  { label: "+1 Hour", getInputs: () => getCurrentISTInputs(60) },
+  { label: "+3 Hours", getInputs: () => getCurrentISTInputs(180) },
   {
     label: "Tomorrow 10 AM",
-    getIso: () => {
-      const d = new Date();
-      d.setDate(d.getDate() + 1);
-      d.setHours(10, 0, 0, 0);
-      return d.toISOString();
+    getInputs: () => {
+      const tomorrow = getCurrentISTInputs(24 * 60);
+      return { date: tomorrow.date, time: "10:00" };
     },
   },
   {
     label: "Tomorrow 3 PM",
-    getIso: () => {
-      const d = new Date();
-      d.setDate(d.getDate() + 1);
-      d.setHours(15, 0, 0, 0);
-      return d.toISOString();
+    getInputs: () => {
+      const tomorrow = getCurrentISTInputs(24 * 60);
+      return { date: tomorrow.date, time: "15:00" };
     },
   },
   {
     label: "In 2 Days",
-    getIso: () => {
-      const d = new Date();
-      d.setDate(d.getDate() + 2);
-      d.setHours(11, 0, 0, 0);
-      return d.toISOString();
+    getInputs: () => {
+      const twoDays = getCurrentISTInputs(48 * 60);
+      return { date: twoDays.date, time: "11:00" };
     },
   },
 ];
@@ -69,21 +64,7 @@ export default function CreateFollowUpModal({
   const { createFollowUp } = useFollowUps();
   const { user } = useAuth();
 
-  // Helper to get local date & time strings
-  const getInitialDateTime = () => {
-    const now = new Date(Date.now() + 60 * 60 * 1000); // 1 hour from now
-    const yyyy = now.getFullYear();
-    const mm = String(now.getMonth() + 1).padStart(2, "0");
-    const dd = String(now.getDate()).padStart(2, "0");
-    const hh = String(now.getHours()).padStart(2, "0");
-    const min = String(now.getMinutes()).padStart(2, "0");
-    return {
-      date: `${yyyy}-${mm}-${dd}`,
-      time: `${hh}:${min}`,
-    };
-  };
-
-  const initialDT = getInitialDateTime();
+  const initialDT = getCurrentISTInputs(60);
   const [customerName, setCustomerName] = useState(defaultLead?.name || "");
   const [customerPhone, setCustomerPhone] = useState(defaultLead?.phone || "");
   const [date, setDate] = useState(initialDT.date);
@@ -96,15 +77,10 @@ export default function CreateFollowUpModal({
 
   if (!isOpen) return null;
 
-  const handlePresetClick = (getIso: () => string) => {
-    const d = new Date(getIso());
-    const yyyy = d.getFullYear();
-    const mm = String(d.getMonth() + 1).padStart(2, "0");
-    const dd = String(d.getDate()).padStart(2, "0");
-    const hh = String(d.getHours()).padStart(2, "0");
-    const min = String(d.getMinutes()).padStart(2, "0");
-    setDate(`${yyyy}-${mm}-${dd}`);
-    setTime(`${hh}:${min}`);
+  const handlePresetClick = (getInputs: () => { date: string; time: string }) => {
+    const res = getInputs();
+    setDate(res.date);
+    setTime(res.time);
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -215,7 +191,7 @@ export default function CreateFollowUpModal({
                   <button
                     key={idx}
                     type="button"
-                    onClick={() => handlePresetClick(p.getIso)}
+                    onClick={() => handlePresetClick(p.getInputs)}
                     className="px-2.5 py-1 rounded-lg bg-slate-100 hover:bg-blue-50 hover:text-blue-700 text-slate-700 font-semibold text-[11px] border border-slate-200/80 transition cursor-pointer active:scale-95"
                   >
                     {p.label}

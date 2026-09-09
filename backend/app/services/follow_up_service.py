@@ -18,11 +18,37 @@ LOCK_EXPIRY_SECONDS = 60   # Lock expiry window for auto-call worker safety
 IST_TZ = timezone(timedelta(hours=5, minutes=30))
 
 
-def parse_datetime_to_utc(dt_val: Any) -> datetime:
-    """Safely converts string, ISO format, or datetime object into UTC datetime, assuming IST for naive datetimes."""
+def utc_to_ist(dt_val: Any) -> datetime:
+    """Converts a UTC datetime or string to Asia/Kolkata (IST: UTC+05:30) datetime."""
     if isinstance(dt_val, datetime):
         if dt_val.tzinfo is None:
-            return dt_val.replace(tzinfo=IST_TZ).astimezone(timezone.utc)
+            dt_val = dt_val.replace(tzinfo=timezone.utc)
+        return dt_val.astimezone(IST_TZ)
+    if isinstance(dt_val, str) and dt_val.strip():
+        dt = parse_datetime_to_utc(dt_val)
+        return dt.astimezone(IST_TZ)
+    return datetime.now(IST_TZ)
+
+
+def format_ist_datetime_str(dt_val: Any) -> str:
+    """Formats datetime consistently as: '09 Sept 2026, 11:07 AM IST'."""
+    if not dt_val:
+        return "Not set"
+    dt_ist = utc_to_ist(dt_val)
+    month_name = dt_ist.strftime("%b")
+    if month_name == "Sep":
+        month_name = "Sept"
+    return f"{dt_ist.strftime('%d')} {month_name} {dt_ist.strftime('%Y')}, {dt_ist.strftime('%I:%M %p')} IST"
+
+
+def parse_datetime_to_utc(dt_val: Any) -> datetime:
+    """
+    Safely converts string, ISO format, or datetime object into UTC datetime,
+    strictly interpreting all naive date/time inputs as Indian Standard Time (IST / Asia/Kolkata / UTC+05:30).
+    """
+    if isinstance(dt_val, datetime):
+        if dt_val.tzinfo is None:
+            return dt_val.replace(tzinfo=timezone.utc)
         return dt_val.astimezone(timezone.utc)
     
     if not dt_val:
@@ -39,43 +65,80 @@ def parse_datetime_to_utc(dt_val: Any) -> datetime:
     elif len(parts) == 2 and "T" in parts[0] and (":" in parts[0] and ":" in parts[1]):
         s = parts[0]
 
-    try:
-        # Try ISO 8601 with or without Z/offset
-        clean_s = s.replace("Z", "+00:00")
-        dt = datetime.fromisoformat(clean_s)
-        if dt.tzinfo is None:
-            if len(s) <= 10 and dt.hour == 0 and dt.minute == 0:
-                dt = dt.replace(hour=10, minute=0)
-            return dt.replace(tzinfo=IST_TZ).astimezone(timezone.utc)
-        return dt.astimezone(timezone.utc)
-    except Exception:
-        pass
-    
-    # Try YYYY-MM-DD HH:MM / YYYY-MM-DD HH:MM:SS / ISO formats
-    for fmt in (
+    s_upper = s.upper()
+
+    # 1. Check if string explicitly contains Z or +offset
+    if "Z" in s or ("+" in s and len(s) > 10):
+        try:
+            clean_s = s.replace("Z", "+00:00")
+            dt = datetime.fromisoformat(clean_s)
+            return dt.astimezone(timezone.utc)
+        except Exception:
+            pass
+
+    # 2. Try 24h & 12h formats (all treated as IST)
+    ist_formats = [
+        # 12-hour AM/PM formats
+        "%Y-%m-%d %I:%M:%S %p",
+        "%Y-%m-%d %I:%M %p",
+        "%d/%m/%Y %I:%M:%S %p",
+        "%d/%m/%Y %I:%M %p",
+        "%d-%m-%Y %I:%M:%S %p",
+        "%d-%m-%Y %I:%M %p",
+        "%m/%d/%Y %I:%M:%S %p",
+        "%m/%d/%Y %I:%M %p",
+        "%Y/%m/%d %I:%M:%S %p",
+        "%Y/%m/%d %I:%M %p",
+
+        # 24-hour formats
         "%Y-%m-%d %H:%M:%S",
         "%Y-%m-%d %H:%M",
         "%Y-%m-%dT%H:%M:%S",
         "%Y-%m-%dT%H:%M",
-        "%d/%m/%Y %H:%M",
         "%d/%m/%Y %H:%M:%S",
-        "%d-%m-%Y %H:%M",
+        "%d/%m/%Y %H:%M",
         "%d-%m-%Y %H:%M:%S",
-    ):
+        "%d-%m-%Y %H:%M",
+        "%m/%d/%Y %H:%M:%S",
+        "%m/%d/%Y %H:%M",
+        "%Y/%m/%d %H:%M:%S",
+        "%Y/%m/%d %H:%M",
+    ]
+
+    for fmt in ist_formats:
         try:
-            dt = datetime.strptime(s, fmt)
+            dt = datetime.strptime(s_upper, fmt)
             return dt.replace(tzinfo=IST_TZ).astimezone(timezone.utc)
         except Exception:
             continue
 
-    for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y"):
+    # 3. Try date-only formats (default to 10:00 AM IST)
+    for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y", "%m/%d/%Y", "%Y/%m/%d"):
         try:
-            # Default date-only follow up to 10:00 AM IST
-            dt = datetime.strptime(s, fmt).replace(hour=10, minute=0)
+            dt = datetime.strptime(s, fmt).replace(hour=10, minute=0, second=0)
             return dt.replace(tzinfo=IST_TZ).astimezone(timezone.utc)
         except Exception:
             continue
-            
+
+    # 4. Try time-only formats like "16:40" or "04:40 PM" (attach today's date in IST)
+    now_ist = datetime.now(IST_TZ)
+    for fmt in ("%I:%M %p", "%I:%M:%S %p", "%H:%M", "%H:%M:%S"):
+        try:
+            t = datetime.strptime(s_upper, fmt).time()
+            dt_combined = datetime.combine(now_ist.date(), t).replace(tzinfo=IST_TZ)
+            return dt_combined.astimezone(timezone.utc)
+        except Exception:
+            continue
+
+    # 5. Fallback: Try ISO fromisoformat
+    try:
+        dt = datetime.fromisoformat(s)
+        if dt.tzinfo is None:
+            return dt.replace(tzinfo=IST_TZ).astimezone(timezone.utc)
+        return dt.astimezone(timezone.utc)
+    except Exception:
+        pass
+
     return utcnow()
 
 

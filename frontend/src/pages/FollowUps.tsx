@@ -5,6 +5,7 @@ import { useFollowUps, FollowUpItem, FollowUpTimelineItem } from "../context/Fol
 import { useAuth } from "../context/AuthContext";
 import { useToast } from "../context/ToastContext";
 import { api } from "../api/client";
+import { formatISTDateTime, parseToDate } from "../utils/dateUtils";
 import CreateFollowUpModal from "../components/CreateFollowUpModal";
 import {
   Calendar,
@@ -171,27 +172,18 @@ export default function FollowUps() {
     await fetchFollowUps(activeTab, searchTerm);
   };
 
-  const formatDisplayDateTime = (dtStr?: string) => {
+  const formatDisplayDateTime = (dtStr?: string, formattedIst?: string) => {
+    if (formattedIst && formattedIst !== "Not set") return formattedIst;
     if (!dtStr) return "Not set";
-    try {
-      const d = new Date(dtStr);
-      return d.toLocaleString("en-IN", {
-        month: "short",
-        day: "numeric",
-        year: "numeric",
-        hour: "2-digit",
-        minute: "2-digit",
-        hour12: true,
-      });
-    } catch {
-      return dtStr;
-    }
+    return formatISTDateTime(dtStr);
   };
 
   const getRelativeTime = (dtStr?: string, status?: string) => {
     if (!dtStr) return "";
     try {
-      const target = new Date(dtStr).getTime();
+      const d = parseToDate(dtStr);
+      if (!d) return "";
+      const target = d.getTime();
       const now = Date.now();
       const diffMins = Math.round((target - now) / (1000 * 60));
 
@@ -576,7 +568,7 @@ export default function FollowUps() {
                     {/* Scheduled Time */}
                     <td className="py-3.5 px-4">
                       <div className="font-bold text-slate-900 font-mono text-xs">
-                        {formatDisplayDateTime(targetDt)}
+                        {formatDisplayDateTime(targetDt, item.formatted_ist || item.scheduled_at_ist)}
                       </div>
                       <span
                         className={`inline-block text-[10px] font-bold px-2 py-0.5 rounded-full mt-1 ${

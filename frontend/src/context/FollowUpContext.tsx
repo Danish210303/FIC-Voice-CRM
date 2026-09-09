@@ -47,6 +47,9 @@ export interface FollowUpItem {
   pool_name: string;
   scheduled_at?: string;
   follow_up_datetime: string;
+  scheduled_at_ist?: string;
+  follow_up_datetime_ist?: string;
+  formatted_ist?: string;
   reason: string;
   notes?: string;
   status:
