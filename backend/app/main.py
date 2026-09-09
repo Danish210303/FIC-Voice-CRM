@@ -219,10 +219,13 @@ async def on_startup():
     else:
         logger.info("Vapi AI Configuration: All required credentials loaded successfully.")
 
+    # Log registered Follow-Up routes for deployment verification
+    logger.info("[STARTUP] Follow-Up Router mounted successfully: /api/follow-ups (GET, GET /stats, POST, PATCH /{id}, DELETE /{id}, POST /{id}/trigger-call, POST /{id}/reassign, POST /{id}/complete)")
+
     # Start persistent 24-hour retention cleanup background job (runs every 10 min)
     global _cleanup_task, _followup_task
     _cleanup_task = asyncio.create_task(start_periodic_cleanup_job())
-    # Start persistent BPO follow-up evaluation job (runs every 15 sec)
+    # Start persistent BPO follow-up evaluation job (runs every 5 sec)
     _followup_task = asyncio.create_task(start_periodic_follow_up_job())
     # Run immediate pass on startup
     asyncio.create_task(purge_expired_calls_and_recordings(retention_hours=24.0))

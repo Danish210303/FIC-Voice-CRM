@@ -137,7 +137,6 @@ export function FollowUpProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const fetchStats = useCallback(async () => {
-    if (!user) return;
     try {
       const res: any = await api.get("/api/follow-ups/stats");
       if (res && typeof res === "object") {
@@ -154,11 +153,10 @@ export function FollowUpProvider({ children }: { children: React.ReactNode }) {
     } catch (err) {
       console.warn("[FOLLOW-UP] Failed to fetch follow-up stats:", err);
     }
-  }, [user]);
+  }, []);
 
   const fetchFollowUps = useCallback(
     async (statusFilter?: string, search?: string) => {
-      if (!user) return;
       setLoading(true);
       try {
         const qParams = new URLSearchParams();
@@ -169,7 +167,6 @@ export function FollowUpProvider({ children }: { children: React.ReactNode }) {
         const res: any = await api.get(`/api/follow-ups?${qParams.toString()}`);
         const items = Array.isArray(res) ? res : res?.data || [];
         setFollowUps(items);
-        await fetchStats();
       } catch (err) {
         console.warn("[FOLLOW-UP] Failed to fetch follow-ups:", err);
         setFollowUps([]);
@@ -177,7 +174,7 @@ export function FollowUpProvider({ children }: { children: React.ReactNode }) {
         setLoading(false);
       }
     },
-    [user, fetchStats]
+    []
   );
 
   // Trigger audio chime and desktop notification

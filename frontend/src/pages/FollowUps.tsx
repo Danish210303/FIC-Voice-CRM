@@ -82,7 +82,8 @@ export default function FollowUps() {
 
   useEffect(() => {
     fetchFollowUps(activeTab, searchTerm);
-  }, [activeTab, fetchFollowUps]);
+    fetchStats();
+  }, [activeTab, fetchFollowUps, fetchStats]);
 
   // Load available agents for reassignment modal
   useEffect(() => {
