@@ -9,6 +9,7 @@ import ShiftSummaryModal from "../components/ShiftSummaryModal";
 import EarlyLogoutWarningModal from "../components/EarlyLogoutWarningModal";
 import TodayAttendanceCard from "../components/TodayAttendanceCard";
 import LiveAgentPoolModal from "../components/LiveAgentPoolModal";
+import UserCallHistorySection from "../components/UserCallHistorySection";
 import {
   Users,
   Phone,
@@ -246,6 +247,16 @@ export default function Dashboard() {
   const todayStr = useMemo(() => new Date().toISOString().split("T")[0], []);
   const [selectedDate, setSelectedDate] = useState<string>(todayStr);
   const [historicalSummary, setHistoricalSummary] = useState<any>(null);
+
+  const initialSearchId = useMemo(() => {
+    try {
+      const hashQuery = window.location.hash.includes("?") ? window.location.hash.split("?")[1] : "";
+      const searchParams = new URLSearchParams(window.location.search || hashQuery);
+      return searchParams.get("user_id") || searchParams.get("search") || searchParams.get("lead_id") || "";
+    } catch {
+      return "";
+    }
+  }, []);
 
   useEffect(() => {
     if (selectedDate !== todayStr) {
@@ -1324,6 +1335,9 @@ export default function Dashboard() {
           </div>
         </div>
       </div>
+
+      {/* ── USER ID SEARCH & COMPLETE CALL HISTORY (ADMIN / SUPERVISOR) ── */}
+      <UserCallHistorySection initialUserId={initialSearchId} />
 
       {/* ── 4. LIVE VOICE ACTIVITY TELEMETRY ── */}
       <div className="bg-white dark:bg-[#182233] border border-slate-200/80 dark:border-white/10 rounded-2xl p-5 shadow-2xs flex flex-col space-y-4">

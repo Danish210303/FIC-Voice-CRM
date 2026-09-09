@@ -4,7 +4,7 @@ import { motion, AnimatePresence } from "framer-motion";
 import {
   X, User, Phone, PhoneCall, FileText, ListOrdered, Copy, Mail, Calendar, Clock,
   CheckCircle2, AlertCircle, Play, Pause, Loader2, Save, Send, Sparkles, UserCheck,
-  ShieldCheck, Activity, PhoneMissed, HelpCircle, ExternalLink, Check
+  ShieldCheck, Activity, PhoneMissed, HelpCircle, ExternalLink, Check, History
 } from "lucide-react";
 import { getBaseUrl, getToken } from "../api/client";
 import CustomDateTimePicker from "./CustomDateTimePicker";
@@ -327,6 +327,16 @@ export default function LeadActionSlideOver({
                       title="Copy User ID"
                     >
                       {copiedId ? <Check className="h-3.5 w-3.5 text-emerald-500" /> : <Copy className="h-3.5 w-3.5" />}
+                    </button>
+                    <button
+                      onClick={() => {
+                        window.location.hash = `/?user_id=${leadId}`;
+                        onClose();
+                      }}
+                      className="p-1 hover:bg-slate-100 dark:hover:bg-white/10 rounded text-slate-500 hover:text-blue-600 transition cursor-pointer"
+                      title="Inspect User Call History on Dashboard"
+                    >
+                      <History className="h-3.5 w-3.5" />
                     </button>
                   </div>
                 </div>

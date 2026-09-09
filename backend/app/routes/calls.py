@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Body, status, Requ
 from fastapi.responses import PlainTextResponse, JSONResponse, Response
 # pyrefly: ignore [missing-import]
 from bson import ObjectId
-from app.core.database import calls_col, leads_col, users_col, audit_logs_col, campaigns_col
+from app.core.database import calls_col, leads_col, users_col, audit_logs_col, campaigns_col, recordings_col, pools_col
 from app.core.utils import utcnow, oid_str, normalize_phone, gen_lead_id
 from app.core.deps import require_roles, get_current_user
 from app.core.http import get_http_client
@@ -962,6 +962,8 @@ async def list_calls(
     user: dict = Depends(get_current_user),
     pool_id: str | None = None,
     agent_id: str | None = None,
+    user_id: str | None = None,
+    search: str | None = None,
     status_filter: str | None = None,
     limit: int = Query(500, ge=1, le=1000)
 ):
@@ -991,6 +993,27 @@ async def list_calls(
         query["pool_id"] = pool_id
     if status_filter:
         query["status"] = status_filter
+
+    search_val = user_id or search
+    if search_val and search_val.strip():
+        s_clean = search_val.strip()
+        raw_digits = re.sub(r"\D", "", s_clean)
+        s_or = [
+            {"lead_id": s_clean},
+            {"user_id": s_clean},
+            {"customer_id": s_clean},
+            {"phone": s_clean}
+        ]
+        if ObjectId.is_valid(s_clean):
+            s_or.append({"_id": ObjectId(s_clean)})
+            s_or.append({"lead_id": ObjectId(s_clean)})
+        if raw_digits and len(raw_digits) >= 6:
+            s_or.append({"phone": {"$regex": raw_digits[-10:] if len(raw_digits) >= 10 else raw_digits}})
+        
+        if "$or" in query:
+            query = {"$and": [query, {"$or": s_or}]}
+        else:
+            query["$or"] = s_or
 
     limit_val = int(limit) if isinstance(limit, int) else (int(str(limit)) if isinstance(limit, str) and str(limit).isdigit() else 500)
     calls_raw = await calls_col.find(query).sort("started_at", -1).limit(limit_val).to_list(length=limit_val)
@@ -1114,6 +1137,448 @@ async def list_calls(
 
         calls.append(oid_str(c))
     return calls
+
+
+@router.get("/user-history/{user_id}", dependencies=[Depends(require_roles(Role.ADMIN, Role.TEAM_LEADER, Role.AGENT, "admin", "team_leader", "supervisor", "agent"))])
+async def get_user_call_history(
+    user_id: str,
+    limit: int = Query(500, ge=1, le=1000),
+    user: dict = Depends(get_current_user)
+):
+    """
+    Returns the complete, chronological call history for a User ID / Lead ID / Phone Number,
+    including both inbound and outbound calls, preserving all historical agent and pool interactions
+    across transfers, recordings, transcripts, and aggregated User Call Summary metrics.
+    """
+    search_term = str(user_id).strip()
+    if not search_term:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "User ID is required")
+
+    # 1. Identify all possible representations of this user / lead
+    lead_oids = []
+    lead_str_ids = [search_term]
+    phones = []
+
+    raw_digits = re.sub(r"\D", "", search_term)
+    if raw_digits:
+        phones.append(search_term)
+        if len(raw_digits) >= 10:
+            phones.append(raw_digits[-10:])
+            phones.append(f"+91{raw_digits[-10:]}")
+            phones.append(f"91{raw_digits[-10:]}")
+            phones.append(raw_digits)
+
+    if ObjectId.is_valid(search_term):
+        lead_oids.append(ObjectId(search_term))
+
+    # Search leads collection for matching lead
+    lead_query_conditions = []
+    if lead_oids:
+        lead_query_conditions.append({"_id": {"$in": lead_oids}})
+    lead_query_conditions.extend([
+        {"lead_id": search_term},
+        {"id": search_term},
+        {"phone": search_term},
+        {"email": search_term},
+        {"user_id": search_term},
+        {"customer_id": search_term}
+    ])
+    if raw_digits and len(raw_digits) >= 10:
+        lead_query_conditions.append({"phone": {"$regex": raw_digits[-10:]}})
+
+    matching_leads = await leads_col.find({"$or": lead_query_conditions}).to_list(length=50)
+    primary_lead = matching_leads[0] if matching_leads else None
+
+    # Aggregate all identifiers from matching leads
+    for ld in matching_leads:
+        ld_oid = ld.get("_id")
+        if ld_oid:
+            lead_oids.append(ld_oid if isinstance(ld_oid, ObjectId) else ObjectId(str(ld_oid)))
+            lead_str_ids.append(str(ld_oid))
+        if ld.get("lead_id"):
+            lead_str_ids.append(str(ld["lead_id"]))
+        if ld.get("id"):
+            lead_str_ids.append(str(ld["id"]))
+        if ld.get("user_id"):
+            lead_str_ids.append(str(ld["user_id"]))
+        if ld.get("customer_id"):
+            lead_str_ids.append(str(ld["customer_id"]))
+        if ld.get("phone"):
+            p_val = str(ld["phone"])
+            phones.append(p_val)
+            p_digits = re.sub(r"\D", "", p_val)
+            if len(p_digits) >= 10:
+                phones.append(p_digits[-10:])
+                phones.append(f"+91{p_digits[-10:]}")
+                phones.append(f"91{p_digits[-10:]}")
+                phones.append(p_digits)
+
+    lead_oids = list({str(o): o for o in lead_oids if ObjectId.is_valid(str(o))}.values())
+    lead_str_ids = list(set(lead_str_ids))
+    phones = list(set(phones))
+
+    # 2. Build the query to find ALL historical calls (Inbound & Outbound)
+    call_or_conditions = []
+    if lead_str_ids:
+        call_or_conditions.append({"lead_id": {"$in": lead_str_ids}})
+        call_or_conditions.append({"user_id": {"$in": lead_str_ids}})
+        call_or_conditions.append({"customer_id": {"$in": lead_str_ids}})
+        call_or_conditions.append({"id": {"$in": lead_str_ids}})
+    if lead_oids:
+        call_or_conditions.append({"lead_id": {"$in": [str(o) for o in lead_oids]}})
+        call_or_conditions.append({"_id": {"$in": lead_oids}})
+    if phones:
+        call_or_conditions.append({"phone": {"$in": phones}})
+        call_or_conditions.append({"to_number": {"$in": phones}})
+        call_or_conditions.append({"from_number": {"$in": phones}})
+        if raw_digits and len(raw_digits) >= 10:
+            call_or_conditions.append({"phone": {"$regex": raw_digits[-10:]}})
+            call_or_conditions.append({"to_number": {"$regex": raw_digits[-10:]}})
+            call_or_conditions.append({"from_number": {"$regex": raw_digits[-10:]}})
+
+    limit_val = int(limit) if isinstance(limit, int) else 500
+    calls_raw = await calls_col.find({"$or": call_or_conditions}).sort("started_at", -1).limit(limit_val).to_list(length=limit_val) if call_or_conditions else []
+
+    # 3. Batch resolve Users / Agents for all calls, original agents, and transfer hops
+    agent_id_set = set()
+    for c in calls_raw:
+        if c.get("agent_id"):
+            agent_id_set.add(str(c["agent_id"]))
+        if c.get("original_agent_id"):
+            agent_id_set.add(str(c["original_agent_id"]))
+        if c.get("transferred_to_agent_id"):
+            agent_id_set.add(str(c["transferred_to_agent_id"]))
+        for t in c.get("transfers", []):
+            if t.get("from_agent_id"):
+                agent_id_set.add(str(t["from_agent_id"]))
+            if t.get("to_agent_id"):
+                agent_id_set.add(str(t["to_agent_id"]))
+        for ah in c.get("agent_history", []):
+            if ah.get("agent_id"):
+                agent_id_set.add(str(ah["agent_id"]))
+
+    user_map = {}
+    if agent_id_set:
+        u_oids = [ObjectId(a) for a in agent_id_set if ObjectId.is_valid(a)]
+        u_strs = list(agent_id_set)
+        u_conds = []
+        if u_oids:
+            u_conds.append({"_id": {"$in": u_oids}})
+        if u_strs:
+            u_conds.append({"id": {"$in": u_strs}})
+            u_conds.append({"employee_id": {"$in": u_strs}})
+            u_conds.append({"email": {"$in": u_strs}})
+
+        found_users = await users_col.find({"$or": u_conds}).to_list(length=1000)
+        for u in found_users:
+            u_id_str = str(u["_id"])
+            user_map[u_id_str] = u
+            if u.get("id"):
+                user_map[str(u["id"])] = u
+            if u.get("employee_id"):
+                user_map[str(u["employee_id"])] = u
+            if u.get("email"):
+                user_map[str(u["email"])] = u
+
+    # 4. Batch resolve Pools
+    pools_map = {}
+    try:
+        all_pools = await pools_col.find({}).to_list(length=100)
+        for p in all_pools:
+            p_id = str(p.get("pool_id") or p.get("id") or p.get("_id"))
+            pools_map[p_id] = p.get("name") or p.get("pool_name") or p_id
+            pools_map[str(p.get("_id"))] = p.get("name") or p_id
+    except Exception:
+        pass
+
+    def get_pool_name(pid: str | None) -> str:
+        if not pid:
+            return "General Queue"
+        pid_clean = str(pid).strip()
+        if pid_clean in pools_map:
+            return pools_map[pid_clean]
+        return pid_clean.replace("_", " ").title()
+
+    # 5. Batch resolve Recordings from recordings_col
+    call_ids_list = [str(c["_id"]) for c in calls_raw]
+    rec_map = {}
+    if call_ids_list:
+        c_oids = [ObjectId(cid) for cid in call_ids_list if ObjectId.is_valid(cid)]
+        found_recs = await recordings_col.find(
+            {"$or": [{"call_id": {"$in": call_ids_list}}, {"call_id": {"$in": c_oids}}]},
+            {"call_id": 1, "secure_url": 1, "recording_url": 1, "public_id": 1, "duration": 1, "duration_seconds": 1, "filename": 1, "status": 1, "transcript": 1, "ai_summary": 1}
+        ).to_list(length=1000)
+        for rc in found_recs:
+            rec_map[str(rc.get("call_id"))] = rc
+
+    # 6. Format calls & build interaction timelines
+    calls = []
+    total_talk_seconds = 0
+    inbound_count = 0
+    outbound_count = 0
+    unique_agents = {}
+    unique_pools = {}
+
+    for c in calls_raw:
+        c_id_str = str(c.get("_id") or c.get("id"))
+        direction = str(c.get("direction") or "outbound").lower()
+        if direction == "inbound":
+            inbound_count += 1
+        else:
+            outbound_count += 1
+
+        duration_sec = int(c.get("duration_seconds") or c.get("duration") or 0)
+
+        # Attach recording if available
+        rc_doc = rec_map.get(c_id_str)
+        if rc_doc:
+            if not c.get("secure_url"):
+                c["secure_url"] = rc_doc.get("secure_url") or rc_doc.get("recording_url")
+            if not c.get("recording_url"):
+                c["recording_url"] = rc_doc.get("recording_url") or rc_doc.get("secure_url")
+            if not c.get("public_id"):
+                c["public_id"] = rc_doc.get("public_id")
+            if not c.get("recording_status"):
+                c["recording_status"] = "saved" if rc_doc.get("status") == "READY" else str(rc_doc.get("status", "")).lower()
+            if duration_sec == 0 and rc_doc.get("duration_seconds"):
+                duration_sec = int(rc_doc["duration_seconds"])
+            if not c.get("transcript") and rc_doc.get("transcript"):
+                c["transcript"] = rc_doc["transcript"]
+            if not c.get("ai_summary") and rc_doc.get("ai_summary"):
+                c["ai_summary"] = rc_doc["ai_summary"]
+
+        total_talk_seconds += duration_sec
+
+        # Primary/Current Agent resolution
+        aid = str(c.get("agent_id")) if c.get("agent_id") else None
+        agent_name = c.get("agent_name")
+        agent_emp_id = None
+        if aid and aid in user_map:
+            u_info = user_map[aid]
+            agent_name = u_info.get("name") or agent_name or "Sales Agent"
+            agent_emp_id = u_info.get("employee_id") or aid
+        elif not agent_name:
+            agent_name = "Sales Agent" if aid else "AI Voice Agent"
+
+        # Original Agent resolution
+        orig_aid = str(c.get("original_agent_id")) if c.get("original_agent_id") else aid
+        orig_agent_name = agent_name
+        if orig_aid and orig_aid in user_map:
+            orig_agent_name = user_map[orig_aid].get("name") or orig_agent_name
+
+        # Pool resolution
+        pool_id_val = str(c.get("pool_id") or "general")
+        pool_name_val = get_pool_name(pool_id_val)
+        orig_pool_id = str(c.get("original_pool_id") or pool_id_val)
+        orig_pool_name = get_pool_name(orig_pool_id)
+
+        # Track unique agents and pools
+        if aid:
+            unique_agents[aid] = {
+                "id": aid,
+                "name": agent_name,
+                "employee_id": agent_emp_id or aid
+            }
+        if orig_aid and orig_aid not in unique_agents:
+            unique_agents[orig_aid] = {
+                "id": orig_aid,
+                "name": orig_agent_name,
+                "employee_id": orig_aid
+            }
+        unique_pools[pool_id_val] = pool_name_val
+        unique_pools[orig_pool_id] = orig_pool_name
+
+        # Chronological Agent & Pool Interaction Timeline
+        interactions = []
+        started_iso = c.get("started_at").isoformat() if hasattr(c.get("started_at"), "isoformat") else str(c.get("started_at") or "")
+
+        # Initial Hop
+        interactions.append({
+            "step": 1,
+            "action": "Initiated & Connected" if c.get("connected_at") else "Initiated",
+            "agent_id": orig_aid or aid,
+            "agent_name": orig_agent_name or agent_name,
+            "pool_id": orig_pool_id,
+            "pool_name": orig_pool_name,
+            "timestamp": started_iso,
+            "notes": "Initial call session with assigned agent & queue"
+        })
+
+        # Transfers / Reassignments
+        transfers_list = c.get("transfers", [])
+        for idx, tr in enumerate(transfers_list):
+            to_aid = str(tr.get("to_agent_id", ""))
+            to_name = tr.get("to_agent_name") or (user_map.get(to_aid, {}).get("name") if to_aid in user_map else "Transferred Agent")
+            to_pid = str(tr.get("to_pool_id") or pool_id_val)
+            interactions.append({
+                "step": idx + 2,
+                "action": "Transferred",
+                "agent_id": to_aid,
+                "agent_name": to_name,
+                "pool_id": to_pid,
+                "pool_name": get_pool_name(to_pid),
+                "timestamp": tr.get("timestamp") or "",
+                "reason": tr.get("reason") or "Manual transfer"
+            })
+            if to_aid:
+                unique_agents[to_aid] = {
+                    "id": to_aid,
+                    "name": to_name,
+                    "employee_id": user_map.get(to_aid, {}).get("employee_id") or to_aid
+                }
+            unique_pools[to_pid] = get_pool_name(to_pid)
+
+        # Build transcript representation
+        transcript_text = c.get("transcript") or ""
+        transcript_list = c.get("transcript_list") or []
+        if not transcript_text and transcript_list:
+            transcript_text = "\n".join([f"{t.get('speaker', 'Agent').capitalize()}: {t.get('text', '')}" for t in transcript_list])
+
+        call_item = {
+            "id": c_id_str,
+            "call_sid": c.get("call_sid") or c.get("twilio_sid") or c_id_str,
+            "lead_id": str(c.get("lead_id") or search_term),
+            "lead_name": c.get("lead_name") or (primary_lead.get("name") if primary_lead else "Customer"),
+            "phone": c.get("phone") or (primary_lead.get("phone") if primary_lead else ""),
+            "direction": direction,
+            "status": str(c.get("call_status") or c.get("status") or "completed"),
+            "outcome": str(c.get("disposition") or c.get("outcome") or "connected"),
+            "duration_seconds": duration_sec,
+            "duration_formatted": f"{duration_sec // 60:02d}:{duration_sec % 60:02d}",
+            "started_at": started_iso,
+            "connected_at": c.get("connected_at").isoformat() if hasattr(c.get("connected_at"), "isoformat") else (str(c.get("connected_at")) if c.get("connected_at") else None),
+            "ended_at": c.get("ended_at").isoformat() if hasattr(c.get("ended_at"), "isoformat") else (str(c.get("ended_at")) if c.get("ended_at") else None),
+            "agent_id": aid or "unassigned",
+            "agent_name": agent_name,
+            "agent_employee_id": agent_emp_id,
+            "original_agent_id": orig_aid,
+            "original_agent_name": orig_agent_name,
+            "pool_id": pool_id_val,
+            "pool_name": pool_name_val,
+            "original_pool_id": orig_pool_id,
+            "original_pool_name": orig_pool_name,
+            "recording_url": c.get("recording_url") or c.get("secure_url"),
+            "recording_status": c.get("recording_status") or ("saved" if (c.get("recording_url") or c.get("secure_url")) else "none"),
+            "transcript": transcript_text,
+            "transcript_list": transcript_list,
+            "disposition": c.get("disposition") or c.get("outcome") or "Unclassified",
+            "notes": c.get("notes") or "",
+            "ai_summary": c.get("ai_summary") or "",
+            "sentiment": c.get("sentiment") or "neutral",
+            "sip_logs": c.get("sip_logs", []),
+            "interactions": interactions
+        }
+        calls.append(call_item)
+
+    # 7. Summary calculation
+    total_calls_count = len(calls)
+    hours = total_talk_seconds // 3600
+    minutes = (total_talk_seconds % 3600) // 60
+    seconds = total_talk_seconds % 60
+    talk_time_formatted = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+
+    summary = {
+        "user_id": search_term,
+        "total_calls": total_calls_count,
+        "inbound_calls": inbound_count,
+        "outbound_calls": outbound_count,
+        "total_talk_time_seconds": total_talk_seconds,
+        "total_talk_time_formatted": talk_time_formatted,
+        "agents_count": len(unique_agents),
+        "agents": list(unique_agents.values()),
+        "pools_count": len(unique_pools),
+        "pools": [{"id": k, "name": v} for k, v in unique_pools.items()],
+        "first_call_at": calls[-1]["started_at"] if calls else None,
+        "last_call_at": calls[0]["started_at"] if calls else None
+    }
+
+    lead_info = None
+    if primary_lead:
+        lead_info = {
+            "id": str(primary_lead["_id"]),
+            "lead_id": primary_lead.get("lead_id") or str(primary_lead["_id"]),
+            "name": primary_lead.get("name") or "Unknown",
+            "phone": primary_lead.get("phone") or "",
+            "email": primary_lead.get("email") or "",
+            "status": primary_lead.get("status") or "new",
+            "source": primary_lead.get("source") or "Direct",
+            "pool_id": primary_lead.get("pool_id") or "general",
+            "pool_name": get_pool_name(primary_lead.get("pool_id")),
+            "assigned_agent_id": str(primary_lead.get("assigned_agent_id") or ""),
+            "created_at": primary_lead.get("created_at").isoformat() if hasattr(primary_lead.get("created_at"), "isoformat") else str(primary_lead.get("created_at") or "")
+        }
+
+    return {
+        "status": "success",
+        "user_id": search_term,
+        "summary": summary,
+        "calls": calls,
+        "lead": lead_info
+    }
+
+
+@router.delete("/{call_id}", dependencies=[Depends(require_roles(Role.ADMIN, Role.TEAM_LEADER, "admin", "team_leader", "supervisor"))])
+@router.delete("/{call_id}/", dependencies=[Depends(require_roles(Role.ADMIN, Role.TEAM_LEADER, "admin", "team_leader", "supervisor"))])
+@router.post("/{call_id}/delete", dependencies=[Depends(require_roles(Role.ADMIN, Role.TEAM_LEADER, "admin", "team_leader", "supervisor"))])
+@router.post("/{call_id}/delete/", dependencies=[Depends(require_roles(Role.ADMIN, Role.TEAM_LEADER, "admin", "team_leader", "supervisor"))])
+async def delete_call_record(call_id: str, user: dict = Depends(get_current_user)):
+    """
+    Deletes a single call record and its associated recording artifacts.
+    Only Admin and Supervisor/Team Leader roles are authorized.
+    Ensures deleting one call does not affect other calls belonging to the same User/Lead.
+    """
+    clean_id = str(call_id).strip()
+    if not clean_id:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Call ID is required")
+
+    call_doc = None
+    if ObjectId.is_valid(clean_id):
+        call_doc = await calls_col.find_one({"_id": ObjectId(clean_id)})
+    if not call_doc:
+        call_doc = await calls_col.find_one({"id": clean_id}) or await calls_col.find_one({"call_sid": clean_id})
+
+    if not call_doc:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Call record not found")
+
+    call_oid = call_doc["_id"]
+    call_id_str = str(call_oid)
+
+    # 1. Delete call document from calls_col
+    await calls_col.delete_one({"_id": call_oid})
+
+    # 2. Delete any associated recording in recordings_col
+    rec_or = [{"call_id": call_id_str}, {"call_id": clean_id}]
+    if ObjectId.is_valid(call_id_str):
+        rec_or.append({"call_id": ObjectId(call_id_str)})
+    await recordings_col.delete_many({"$or": rec_or})
+
+    # 3. Log deletion in audit_logs_col
+    await audit_logs_col.insert_one({
+        "action": "delete_call_record",
+        "user_id": _uid(user),
+        "actor_name": user.get("name") or "Admin",
+        "call_id": call_id_str,
+        "lead_id": str(call_doc.get("lead_id", "")),
+        "phone": call_doc.get("phone", ""),
+        "timestamp": utcnow()
+    })
+
+    # 4. Broadcast real-time WebSocket event
+    ws_payload = {
+        "event": "call_deleted",
+        "call_id": call_id_str,
+        "lead_id": str(call_doc.get("lead_id", "")),
+        "phone": call_doc.get("phone", "")
+    }
+    await ws_manager.broadcast("global", ws_payload)
+    if call_doc.get("pool_id"):
+        await ws_manager.broadcast(call_doc["pool_id"], ws_payload)
+
+    return {
+        "status": "success",
+        "message": "Call record deleted successfully",
+        "deleted_call_id": call_id_str
+    }
 
 
 @router.post("/cleanup-expired", dependencies=[Depends(require_roles(Role.ADMIN, Role.TEAM_LEADER))])
@@ -2821,18 +3286,52 @@ async def manual_call_transfer(call_id: str, payload: ManualCallTransferPayload,
     sip_msg = f"[{utcnow().isoformat()}] [SIP] Initiating Call Transfer (SIP REFER to agent {target_user['name']})"
     sip_msg_ok = f"[{utcnow().isoformat()}] [SIP] Transfer successful. Connected agent: {target_user['name']}"
     
+    orig_agent_id = str(call.get("original_agent_id") or call.get("agent_id") or _uid(user))
+    orig_pool_id = str(call.get("original_pool_id") or call.get("pool_id") or "general")
+    target_pool_id = str(target_user.get("pool_id") or call.get("pool_id") or orig_pool_id)
+
+    transfer_record = {
+        "from_agent_id": str(call.get("agent_id") or _uid(user)),
+        "from_agent_name": user.get("name") or "Agent",
+        "to_agent_id": new_agent_id,
+        "to_agent_name": target_user.get("name") or "Agent",
+        "from_pool_id": orig_pool_id,
+        "to_pool_id": target_pool_id,
+        "timestamp": utcnow().isoformat(),
+        "reason": getattr(payload, "reason", "manual_transfer") or "manual_transfer"
+    }
+
     await calls_col.update_one(
         {"_id": ObjectId(call_id)},
         {
-            "$set": {"agent_id": new_agent_id},
-            "$push": {"sip_logs": {"$each": [sip_msg, sip_msg_ok]}}
+            "$set": {
+                "agent_id": new_agent_id,
+                "agent_name": target_user.get("name"),
+                "pool_id": target_pool_id,
+                "original_agent_id": orig_agent_id,
+                "original_pool_id": orig_pool_id,
+                "status": "live",
+                "call_status": "transferred"
+            },
+            "$push": {
+                "sip_logs": {"$each": [sip_msg, sip_msg_ok]},
+                "transfers": transfer_record,
+                "agent_history": {
+                    "agent_id": new_agent_id,
+                    "agent_name": target_user.get("name"),
+                    "pool_id": target_pool_id,
+                    "transferred_at": utcnow().isoformat()
+                }
+            }
         }
     )
     
-    await leads_col.update_one(
-        {"_id": ObjectId(call["lead_id"])},
-        {"$set": {"assigned_agent_id": new_agent_id}}
-    )
+    lead_id_val = call.get("lead_id")
+    if lead_id_val and ObjectId.is_valid(str(lead_id_val)):
+        await leads_col.update_one(
+            {"_id": ObjectId(str(lead_id_val))},
+            {"$set": {"assigned_agent_id": new_agent_id, "pool_id": target_pool_id}}
+        )
     
     await audit_logs_col.insert_one({
         "action": "call_transfer",
@@ -2845,15 +3344,19 @@ async def manual_call_transfer(call_id: str, payload: ManualCallTransferPayload,
     ws_payload = {
         "event": "manual_call_transferred",
         "call_id": call_id,
+        "lead_id": str(call.get("lead_id") or ""),
+        "phone": call.get("phone") or "",
         "from_agent_id": _uid(user),
         "to_agent_id": new_agent_id,
         "to_agent_name": target_user["name"],
+        "pool_id": target_pool_id,
         "sip_message": sip_msg_ok
     }
     await ws_manager.broadcast("global", ws_payload)
-    await ws_manager.broadcast(call["pool_id"], ws_payload)
+    await ws_manager.broadcast(call.get("pool_id", "global"), ws_payload)
+    await ws_manager.broadcast(target_pool_id, ws_payload)
     
-    return {"status": "success", "transferred_to": target_user["name"]}
+    return {"status": "success", "transferred_to": target_user["name"], "target_pool": target_pool_id}
 
 
 @router.post("/{call_id}/manual-end", dependencies=[Depends(require_roles(Role.ADMIN, Role.TEAM_LEADER, Role.AGENT))])

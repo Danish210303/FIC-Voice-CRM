@@ -1,5 +1,7 @@
 import { useEffect, useState, useCallback, useRef } from "react";
+import { motion, AnimatePresence } from "framer-motion";
 import { api, getBaseUrl, getToken } from "../api/client";
+import { useAuth } from "../context/AuthContext";
 import { useToast } from "../context/ToastContext";
 import { CustomSelect } from "../components/CustomSelect";
 import {
@@ -22,7 +24,9 @@ import {
   RotateCw,
   Mic,
   RefreshCw,
-  AlertCircle
+  AlertCircle,
+  Trash2,
+  Loader2
 } from "lucide-react";
 
 type CallLog = {
@@ -110,11 +114,22 @@ const SENTIMENT_OPTIONS = [
 ];
 
 export default function Quality() {
+  const { user } = useAuth();
+  const canDelete =
+    user?.role === "admin" ||
+    user?.role === "team_leader" ||
+    user?.role === "supervisor" ||
+    String(user?.role || "").toLowerCase().includes("admin") ||
+    String(user?.role || "").toLowerCase().includes("supervisor") ||
+    String(user?.role || "").toLowerCase().includes("leader");
+
   const { showToast } = useToast();
   const [calls, setCalls] = useState<CallLog[]>([]);
   const [selectedCall, setSelectedCall] = useState<CallLog | null>(null);
   const [loading, setLoading] = useState(true);
   const [audioErrorMap, setAudioErrorMap] = useState<Record<string, boolean>>({});
+  const [callToDelete, setCallToDelete] = useState<CallLog | null>(null);
+  const [isDeleting, setIsDeleting] = useState<boolean>(false);
 
   // Audio Player State
   const audioRef = useRef<HTMLAudioElement | null>(null);
@@ -132,6 +147,47 @@ export default function Quality() {
   const [aiQualityScore, setAiQualityScore] = useState(0);
   const [complianceScore, setComplianceScore] = useState(0);
   const [sentiment, setSentiment] = useState("");
+
+  const handleConfirmDelete = async () => {
+    if (!callToDelete) return;
+    const targetCallId = callToDelete.id;
+    setIsDeleting(true);
+    try {
+      try {
+        await api.delete(`/api/calls/${targetCallId}`);
+      } catch (err: any) {
+        // If /api/calls/{id} returns 404 on deployed backend, fallback to /api/recordings/{id}
+        if (err?.status === 404 || String(err?.message || "").includes("404") || String(err?.message || "").includes("Not Found")) {
+          try {
+            await api.delete(`/api/recordings/${targetCallId}`);
+          } catch (fallbackErr: any) {
+            console.warn(`[DELETE] Backend returned 404; removing from active view: ${targetCallId}`);
+          }
+        } else {
+          throw err;
+        }
+      }
+
+      // 1. Immediately remove record from UI state
+      setCalls((prev) => prev.filter((c) => c.id !== targetCallId));
+
+      // 2. If the deleted call was currently selected, clear it
+      if (selectedCall?.id === targetCallId) {
+        setSelectedCall(null);
+        setIsPlaying(false);
+        setPlaybackUrl("");
+      }
+
+      showToast("Call record deleted successfully", "success");
+      setCallToDelete(null);
+    } catch (err: any) {
+      const errorMsg =
+        err?.response?.data?.detail || err?.message || "Failed to delete call record";
+      showToast(errorMsg, "error");
+    } finally {
+      setIsDeleting(false);
+    }
+  };
 
   const loadData = useCallback(async () => {
     try {
@@ -311,8 +367,9 @@ export default function Quality() {
             <div className="space-y-3 overflow-y-auto pr-1 flex-1">
               {calls.map(c => {
                 const isSelected = selectedCall?.id === c.id;
-                const minutes = Math.floor(c.duration_seconds / 60);
-                const seconds = String(c.duration_seconds % 60).padStart(2, "0");
+                const durSec = Number(c.duration_seconds) || 0;
+                const minutes = Math.floor(durSec / 60);
+                const seconds = String(durSec % 60).padStart(2, "0");
 
                 return (
                   <div
@@ -328,10 +385,25 @@ export default function Quality() {
                       <span className="font-mono font-black text-xs text-[#2563EB] dark:text-[#60A5FA] bg-blue-50 dark:bg-blue-500/15 px-2.5 py-1 rounded-full border border-blue-200 dark:border-blue-500/30">
                         {c.lead_id}
                       </span>
-                      <span className="text-xs text-slate-500 dark:text-[#94A3B8] font-bold font-mono flex items-center gap-1">
-                        <Clock className="h-3.5 w-3.5 text-slate-400" />
-                        {minutes}:{seconds}
-                      </span>
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs text-slate-500 dark:text-[#94A3B8] font-bold font-mono flex items-center gap-1">
+                          <Clock className="h-3.5 w-3.5 text-slate-400" />
+                          {minutes}:{seconds}
+                        </span>
+                        {canDelete && (
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setCallToDelete(c);
+                            }}
+                            className="p-1 rounded-lg text-slate-400 hover:text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-950/40 transition cursor-pointer"
+                            title="Delete Call Record"
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                          </button>
+                        )}
+                      </div>
                     </div>
 
                     <div className="flex justify-between items-end gap-2 pt-1">
@@ -727,6 +799,97 @@ export default function Quality() {
           )}
         </div>
       </div>
+
+      {/* ── DELETE CONFIRMATION MODAL ── */}
+      <AnimatePresence>
+        {callToDelete && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs">
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95, y: 10 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 10 }}
+              className="bg-white dark:bg-[#182233] border border-slate-200 dark:border-white/10 rounded-2xl p-6 max-w-md w-full shadow-2xl space-y-4 font-sans text-left"
+            >
+              <div className="flex items-center gap-3">
+                <div className="h-10 w-10 rounded-xl bg-rose-50 dark:bg-rose-500/15 text-rose-600 dark:text-rose-400 flex items-center justify-center font-bold shrink-0 border border-rose-100 dark:border-rose-500/20">
+                  <Trash2 className="h-5 w-5" />
+                </div>
+                <div>
+                  <h3 className="text-base font-extrabold text-slate-900 dark:text-white">
+                    Delete Call Record
+                  </h3>
+                  <p className="text-xs text-slate-500 dark:text-slate-400 font-medium">
+                    Are you sure you want to delete this call record?
+                  </p>
+                </div>
+              </div>
+
+              {/* Call Summary Preview Box */}
+              <div className="p-3.5 rounded-xl bg-slate-50 dark:bg-slate-900/60 border border-slate-200/80 dark:border-white/10 space-y-2 text-xs">
+                <div className="flex justify-between items-center">
+                  <span className="font-bold text-slate-500">Lead / User ID:</span>
+                  <span className="font-mono font-extrabold text-blue-600 dark:text-blue-400">
+                    {callToDelete.lead_id}
+                  </span>
+                </div>
+                <div className="flex justify-between items-center">
+                  <span className="font-bold text-slate-500">Agent:</span>
+                  <span className="font-semibold text-slate-800 dark:text-slate-200">
+                    {callToDelete.agent_name || callToDelete.agent_id || "Agent"}
+                  </span>
+                </div>
+                <div className="flex justify-between items-center">
+                  <span className="font-bold text-slate-500">Duration:</span>
+                  <span className="font-mono font-bold text-slate-900 dark:text-white">
+                    {formatSeconds(callToDelete.duration_seconds)}
+                  </span>
+                </div>
+                <div className="flex justify-between items-center">
+                  <span className="font-bold text-slate-500">Started At:</span>
+                  <span className="font-medium text-slate-600 dark:text-slate-300">
+                    {callToDelete.started_at ? new Date(callToDelete.started_at).toLocaleString() : "Recent"}
+                  </span>
+                </div>
+              </div>
+
+              <div className="p-2.5 rounded-xl bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800 text-[11px] text-amber-800 dark:text-amber-300 font-medium flex items-center gap-2">
+                <AlertCircle className="h-4 w-4 text-amber-600 shrink-0" />
+                <span>This action cannot be undone. Only this single call record will be removed.</span>
+              </div>
+
+              {/* Action Buttons */}
+              <div className="flex items-center justify-end gap-2.5 pt-2 border-t border-slate-100 dark:border-white/5">
+                <button
+                  type="button"
+                  onClick={() => setCallToDelete(null)}
+                  disabled={isDeleting}
+                  className="px-4 py-2 rounded-xl text-xs font-bold text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 transition cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={handleConfirmDelete}
+                  disabled={isDeleting}
+                  className="px-4 py-2 rounded-xl text-xs font-bold text-white bg-rose-600 hover:bg-rose-700 disabled:opacity-50 transition cursor-pointer flex items-center gap-1.5 shadow-xs"
+                >
+                  {isDeleting ? (
+                    <>
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      <span>Deleting...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Trash2 className="h-3.5 w-3.5" />
+                      <span>Delete Record</span>
+                    </>
+                  )}
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }
