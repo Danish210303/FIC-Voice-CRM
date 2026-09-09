@@ -93,10 +93,12 @@ export function FollowUpProvider({ children }: { children: React.ReactNode }) {
   const fetchStats = useCallback(async () => {
     if (!user) return;
     try {
-      const res: FollowUpStats = await api.get("/api/follow-ups/stats");
-      setStats(res);
-    } catch (err) {
-      // ignore
+      const res: any = await api.get("/api/follow-ups/stats");
+      if (res && typeof res === "object" && "total" in res) {
+        setStats(res as FollowUpStats);
+      }
+    } catch {
+      // silent fallback
     }
   }, [user]);
 
@@ -112,11 +114,15 @@ export function FollowUpProvider({ children }: { children: React.ReactNode }) {
         if (search) {
           url += `&search=${encodeURIComponent(search)}`;
         }
-        const data: FollowUpItem[] = await api.get(url);
-        setFollowUps(data);
+        const data = await api.get(url);
+        if (Array.isArray(data)) {
+          setFollowUps(data);
+        } else {
+          setFollowUps([]);
+        }
         await fetchStats();
-      } catch (err) {
-        console.warn("[FOLLOW-UP] Failed to fetch follow-ups:", err);
+      } catch {
+        setFollowUps([]);
       } finally {
         setLoading(false);
       }

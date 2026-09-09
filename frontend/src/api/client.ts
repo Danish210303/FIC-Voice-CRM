@@ -147,9 +147,12 @@ export async function apiFetch(
         return [];
       }
 
-      // Gracefully handle 404 Not Found for optional presence, session & shift-summary polling endpoints
-      if (res.status === 404 && (path.includes("session") || path.includes("presence") || path.includes("shift-summary"))) {
-        return null;
+      // Gracefully handle 404 Not Found for optional presence, session, shift-summary & follow-ups polling endpoints
+      if (res.status === 404 && (path.includes("session") || path.includes("presence") || path.includes("shift-summary") || path.includes("follow-ups"))) {
+        if (path.includes("stats")) {
+          return { upcoming: 0, due_now: 0, due: 0, completed: 0, missed: 0, total: 0 };
+        }
+        return path.includes("follow-ups") ? [] : null;
       }
 
       if (!res.ok) {
