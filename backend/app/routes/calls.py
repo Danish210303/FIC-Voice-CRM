@@ -1472,6 +1472,7 @@ async def get_user_call_history(
 
     # 7. Summary calculation
     total_calls_count = len(calls)
+    total_transfers_count = sum(len(c.get("transfers", [])) for c in calls_raw)
     hours = total_talk_seconds // 3600
     minutes = (total_talk_seconds % 3600) // 60
     seconds = total_talk_seconds % 60
@@ -1488,6 +1489,7 @@ async def get_user_call_history(
         "agents": list(unique_agents.values()),
         "pools_count": len(unique_pools),
         "pools": [{"id": k, "name": v} for k, v in unique_pools.items()],
+        "transfers_count": total_transfers_count,
         "first_call_at": calls[-1]["started_at"] if calls else None,
         "last_call_at": calls[0]["started_at"] if calls else None
     }
