@@ -643,6 +643,10 @@ class PlivoWebRTCService {
         audioElem.volume = this.speakerVolume;
         audioElem.autoplay = true;
 
+        if (this.audioOutputDeviceId && this.audioOutputDeviceId !== "default" && typeof (audioElem as any).setSinkId === "function") {
+          (audioElem as any).setSinkId(this.audioOutputDeviceId).catch(() => {});
+        }
+
         audioElem
           .play()
           .then(() => {
@@ -650,32 +654,11 @@ class PlivoWebRTCService {
             this.diagnostics.audioElementPlaying = true;
           })
           .catch((err) => {
-            console.warn("[MEDIA] Autoplay deferred on audio element, using WebAudio fallback:", err);
+            console.warn("[MEDIA] Autoplay deferred on audio element:", err);
           });
       } catch (err) {
         console.warn("[MEDIA] Failed to assign srcObject to audio element:", err);
       }
-    }
-
-    // 2. Route through Web Audio API for continuous background playback
-    try {
-      const ctx = this.getAudioContext();
-      if (ctx) {
-        if (this.remoteSourceNode) {
-          try {
-            this.remoteSourceNode.disconnect();
-          } catch {}
-        }
-        this.remoteSourceNode = ctx.createMediaStreamSource(stream);
-        if (this.speakerGainNode) {
-          this.remoteSourceNode.connect(this.speakerGainNode);
-          this.speakerGainNode.gain.value = this.isSpeakerMuted ? 0 : this.speakerVolume;
-        }
-        this.diagnostics.webAudioActive = true;
-        console.log("[WEBAUDIO] Remote audio stream routed to Web Audio pipeline successfully");
-      }
-    } catch (err) {
-      console.warn("[WEBAUDIO] Pipeline routing warning:", err);
     }
 
     this.diagnostics.audioElementExists = true;
