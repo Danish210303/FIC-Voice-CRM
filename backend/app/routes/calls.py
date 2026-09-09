@@ -2,12 +2,13 @@ import asyncio
 import httpx
 import logging
 import os
+import re
 from urllib.parse import quote
-# pyrefly: ignore [missing-import]
-from fastapi import APIRouter, Depends, HTTPException, Query, Body, status, Request
-from fastapi.responses import PlainTextResponse, JSONResponse, Response
-# pyrefly: ignore [missing-import]
 from bson import ObjectId
+from fastapi import APIRouter, Depends, HTTPException, Query, Body, status, Request, Form
+from fastapi.responses import PlainTextResponse, JSONResponse, Response
+
+from app.core.config import settings
 from app.core.database import calls_col, leads_col, users_col, audit_logs_col, campaigns_col, recordings_col, pools_col, follow_ups_col
 from app.core.utils import utcnow, oid_str, normalize_phone, gen_lead_id
 from app.core.deps import require_roles, get_current_user
@@ -56,18 +57,6 @@ def normalize_e164(phone_str: str) -> str:
     elif str(phone_str).strip().startswith("+"):
         return f"+{cleaned}"
     return f"+{cleaned}"
-
-
-# pyrefly: ignore [missing-import]
-from fastapi import Form
-# pyrefly: ignore [missing-import]
-from fastapi.responses import PlainTextResponse
-# Twilio removed – Plivo is the sole voice provider
-from urllib.parse import quote
-import re
-from app.core.config import settings
-
-# Twilio token & TwiML endpoints removed – Plivo handles all inbound/outbound calls.
 
 
 @router.api_route("/plivo/answer", methods=["GET", "POST"])
