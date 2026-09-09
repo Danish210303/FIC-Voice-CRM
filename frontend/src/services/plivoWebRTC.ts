@@ -98,24 +98,6 @@ if (typeof window !== "undefined" && window.RTCPeerConnection && !(window as any
       const pc: RTCPeerConnection = Reflect.construct(target, [config, ...args.slice(1)], newTarget);
       activePeerConnections.add(pc);
 
-      // Safe-guard against duplicate setRemoteDescription on stable signaling state (e.g. 183 Session Progress followed by 200 OK)
-      const originalSetRemoteDescription = pc.setRemoteDescription.bind(pc);
-      pc.setRemoteDescription = async function (description: RTCSessionDescriptionInit) {
-        if (pc.signalingState === "stable" && description && (description.type === "answer" || description.type === "pranswer")) {
-          console.warn(`[WEBRTC] Skipping duplicate setRemoteDescription(${description.type}) on stable signalingState`);
-          return Promise.resolve();
-        }
-        try {
-          return await originalSetRemoteDescription(description);
-        } catch (err: any) {
-          if (err?.name === "InvalidStateError" && pc.signalingState === "stable") {
-            console.warn("[WEBRTC] Handled setRemoteDescription in stable state gracefully");
-            return Promise.resolve();
-          }
-          throw err;
-        }
-      };
-
       pc.addEventListener("icegatheringstatechange", () => {
         console.log(`[WEBRTC ICE] Gathering state: ${pc.iceGatheringState}`);
       });
@@ -153,7 +135,7 @@ if (typeof window !== "undefined" && window.RTCPeerConnection && !(window as any
         }
       });
 
-      // Directly capture and bind remote audio track with zero latency
+      // Directly capture and bind remote audio track immediately on arrival
       pc.addEventListener("track", (event: RTCTrackEvent) => {
         console.log(`[WEBRTC TRACK] Inbound track received: kind=${event.track.kind}, readyState=${event.track.readyState}, id=${event.track.id}`);
         if (event.track.kind === "audio") {
@@ -199,10 +181,8 @@ class PlivoWebRTCService {
   private speakerVolume: number = 1.0;
   private isHold: boolean = false;
 
-  // Web Audio Context pipeline for background Electron / browser output
+  // Web Audio Context for unlocking browser audio autoplay
   private audioCtx: AudioContext | null = null;
-  private remoteSourceNode: MediaStreamAudioSourceNode | null = null;
-  private speakerGainNode: GainNode | null = null;
 
   private diagnostics: MediaDiagnostics = {
     micPermission: false,
@@ -235,9 +215,6 @@ class PlivoWebRTCService {
       const AudioCtxClass = window.AudioContext || (window as any).webkitAudioContext;
       if (AudioCtxClass) {
         this.audioCtx = new AudioCtxClass();
-        this.speakerGainNode = this.audioCtx.createGain();
-        this.speakerGainNode.gain.value = this.isSpeakerMuted ? 0 : this.speakerVolume;
-        this.speakerGainNode.connect(this.audioCtx.destination);
       }
     }
     if (this.audioCtx && this.audioCtx.state === "suspended") {
@@ -249,62 +226,59 @@ class PlivoWebRTCService {
   public unlockAudio(): void {
     const ctx = this.getAudioContext();
     if (ctx && ctx.state === "suspended") {
-      ctx.resume().then(() => {
-        console.log("[WEBAUDIO] AudioContext unlocked and active");
-        this.diagnostics.webAudioActive = true;
-        this.notifyStateChange();
-      }).catch((e) => console.warn("[WEBAUDIO] Unlock error:", e));
+      ctx
+        .resume()
+        .then(() => {
+          console.log("[WEBAUDIO] AudioContext unlocked and active");
+          this.diagnostics.webAudioActive = true;
+          this.notifyStateChange();
+        })
+        .catch((e) => console.warn("[WEBAUDIO] Unlock error:", e));
+    } else if (ctx && ctx.state === "running") {
+      this.diagnostics.webAudioActive = true;
+    }
+
+    const elem = this.ensureRemoteAudioElement();
+    if (elem) {
+      elem.play().catch(() => {});
     }
   }
 
   // ──────────────────────────────────────────────
-  // Microphone Initialization
+  // Microphone Initialization & Permission Check
   // ──────────────────────────────────────────────
   public async initializeMicrophone(): Promise<boolean> {
-    if (this.localStream && this.localStream.getAudioTracks().some((t) => t.readyState === "live")) {
-      console.log("[PLIVO] Microphone already active, reusing live audio stream.");
-      return true;
-    }
-
     try {
       if (typeof window === "undefined" || !navigator.mediaDevices?.getUserMedia) return false;
 
-      const constraints: MediaStreamConstraints = {
+      // Request initial mic permission to populate devices and verify access
+      const probeStream = await navigator.mediaDevices.getUserMedia({
         audio: {
           echoCancellation: true,
           noiseSuppression: true,
           autoGainControl: true,
-          deviceId:
-            this.audioInputDeviceId !== "default"
-              ? { exact: this.audioInputDeviceId }
-              : undefined,
+          deviceId: this.audioInputDeviceId !== "default" ? { exact: this.audioInputDeviceId } : undefined,
         },
         video: false,
-      };
-
-      const stream = await navigator.mediaDevices.getUserMedia(constraints);
-      this.localStream = stream;
-      (window as any).localStream = stream;
-
-      const tracks = stream.getAudioTracks();
-      const firstTrack = tracks[0];
-
-      // Ensure active enabled status
-      tracks.forEach((t) => {
-        t.enabled = !this.isMuted && !this.isHold;
       });
+
+      const tracks = probeStream.getAudioTracks();
+      const firstTrack = tracks[0];
 
       this.diagnostics.micPermission = true;
       this.diagnostics.localStream = true;
       this.diagnostics.localAudioTracks = tracks.length;
-      this.diagnostics.localTrackLive = firstTrack ? firstTrack.readyState === "live" : false;
+      this.diagnostics.localTrackLive = firstTrack ? firstTrack.readyState === "live" : true;
       this.diagnostics.micDeviceName = firstTrack?.label || "Default Microphone";
 
-      console.log("[PLIVO] Local microphone stream initialized successfully");
+      // Stop the temporary probe tracks so Plivo SDK's own capture stream has exclusive mic access
+      tracks.forEach((t) => t.stop());
+
+      console.log(`[PLIVO] Microphone permission verified: ${this.diagnostics.micDeviceName}`);
       this.notifyStateChange();
       return true;
     } catch (err) {
-      console.warn("[PLIVO] Microphone initialization warning:", err);
+      console.warn("[PLIVO] Microphone permission warning:", err);
       this.diagnostics.micPermission = false;
       this.diagnostics.localStream = false;
       this.diagnostics.localAudioTracks = 0;
@@ -317,10 +291,10 @@ class PlivoWebRTCService {
   // ──────────────────────────────────────────────
   // Single Authoritative Remote Audio Element
   // ──────────────────────────────────────────────
-  private ensureRemoteAudioElement(): HTMLAudioElement | null {
+  public ensureRemoteAudioElement(): HTMLAudioElement | null {
     if (typeof document === "undefined") return null;
 
-    // Clean up any legacy conflicting elements
+    // Clean up legacy conflicting elements
     const legacyIds = ["remoteAudio", "plivo-remote-audio", "plivo_audio"];
     legacyIds.forEach((id) => {
       const oldElem = document.getElementById(id);
@@ -337,18 +311,14 @@ class PlivoWebRTCService {
       elem.autoplay = true;
       elem.setAttribute("playsinline", "true");
       elem.setAttribute("data-devicetype", "speakerDevice");
-      elem.style.position = "absolute";
-      elem.style.left = "-9999px";
-      elem.style.width = "1px";
-      elem.style.height = "1px";
-      elem.style.opacity = "0.01";
+      elem.style.cssText = "position: fixed; left: -9999px; bottom: 0; width: 1px; height: 1px; opacity: 0.001; pointer-events: none;";
       document.body.appendChild(elem);
       console.log(`[MEDIA] Created primary authoritative audio element #${PRIMARY_REMOTE_ID}`);
     }
 
     elem.hidden = false;
     elem.autoplay = true;
-    elem.muted = this.isSpeakerMuted;
+    elem.muted = this.isSpeakerMuted || this.isHold;
     elem.volume = this.speakerVolume;
 
     return elem;
@@ -405,7 +375,7 @@ class PlivoWebRTCService {
       this.setCallState("REGISTERING");
       this.unlockAudio();
 
-      // 1. Microphone access
+      // 1. Microphone access check
       await this.initializeMicrophone();
 
       // 2. Fetch endpoint credentials
@@ -555,6 +525,7 @@ class PlivoWebRTCService {
           console.log("[PLIVO] onCallConnected event fired");
           this.currentCall = data || this.currentCall;
           this.unlockAudio();
+          this.extractAndBindRemoteStream();
           window.dispatchEvent(new CustomEvent("plivo_webrtc_call_connected", { detail: data }));
         });
 
@@ -623,7 +594,7 @@ class PlivoWebRTCService {
   }
 
   // ──────────────────────────────────────────────
-  // Remote Audio Stream Binding & WebAudio Routing
+  // Remote Audio Stream Binding
   // ──────────────────────────────────────────────
   public bindRemoteStream(streamOrEvent: any): void {
     if (!streamOrEvent) return;
@@ -659,14 +630,14 @@ class PlivoWebRTCService {
 
     console.log(`[MEDIA] Binding remote audio stream. Tracks: ${tracks.length}, state: ${firstTrack?.readyState || "live"}`);
 
-    // 1. Bind to single primary HTMLAudioElement
+    // Bind to single primary HTMLAudioElement
     const audioElem = this.ensureRemoteAudioElement();
     if (audioElem) {
       try {
         if (audioElem.srcObject !== stream) {
           audioElem.srcObject = stream;
         }
-        audioElem.muted = this.isSpeakerMuted;
+        audioElem.muted = this.isSpeakerMuted || this.isHold;
         audioElem.volume = this.speakerVolume;
         audioElem.autoplay = true;
 
@@ -679,6 +650,7 @@ class PlivoWebRTCService {
           .then(() => {
             console.log("[MEDIA] Primary audio element playback active (#plivo_webrtc_remoteview)");
             this.diagnostics.audioElementPlaying = true;
+            this.notifyStateChange();
           })
           .catch((err) => {
             console.warn("[MEDIA] Autoplay deferred on audio element:", err);
@@ -754,6 +726,8 @@ class PlivoWebRTCService {
           return;
         }
       }
+
+      this.extractAndBindRemoteStream();
     }, 100);
   }
 
@@ -778,10 +752,6 @@ class PlivoWebRTCService {
         console.error("[PLIVO] Outbound call blocked: client.isLoggedIn is false");
         this.setCallState("FAILED");
         return false;
-      }
-
-      if (!this.localStream) {
-        await this.initializeMicrophone();
       }
 
       this.ensureRemoteAudioElement();
@@ -816,9 +786,6 @@ class PlivoWebRTCService {
     if (typeof this.client?.answer === "function") {
       try {
         this.unlockAudio();
-        if (!this.localStream) {
-          await this.initializeMicrophone();
-        }
         this.ensureRemoteAudioElement();
 
         if (callUUID) {
@@ -876,14 +843,18 @@ class PlivoWebRTCService {
     this.isMuted = muted;
     this.diagnostics.isMuted = muted;
 
-    // 1. Toggle local stream microphone tracks
-    if (this.localStream) {
-      this.localStream.getAudioTracks().forEach((track) => {
-        track.enabled = !muted;
-      });
+    // 1. Inform Plivo Browser SDK client
+    try {
+      if (muted && typeof this.client?.mute === "function") {
+        this.client.mute();
+      } else if (!muted && typeof this.client?.unmute === "function") {
+        this.client.unmute();
+      }
+    } catch (e) {
+      console.warn("[PLIVO] Client mute/unmute call warning:", e);
     }
 
-    // 2. Toggle active PeerConnection audio senders
+    // 2. Toggle active PeerConnection audio senders directly
     activePeerConnections.forEach((pc) => {
       try {
         pc.getSenders().forEach((sender) => {
@@ -896,15 +867,11 @@ class PlivoWebRTCService {
       }
     });
 
-    // 3. Inform Plivo Browser SDK client if available
-    try {
-      if (muted && typeof this.client?.mute === "function") {
-        this.client.mute();
-      } else if (!muted && typeof this.client?.unmute === "function") {
-        this.client.unmute();
-      }
-    } catch (e) {
-      console.warn("[PLIVO] Client mute/unmute call warning:", e);
+    // 3. Toggle local stream tracks if present
+    if (this.localStream) {
+      this.localStream.getAudioTracks().forEach((track) => {
+        track.enabled = !muted;
+      });
     }
 
     console.log(`[MEDIA] Agent microphone ${muted ? "MUTED" : "UNMUTED"} (Customer audio playback unchanged)`);
@@ -925,10 +892,6 @@ class PlivoWebRTCService {
       this.diagnostics.audioElementMuted = muted;
     }
 
-    if (this.speakerGainNode) {
-      this.speakerGainNode.gain.value = muted ? 0 : this.speakerVolume;
-    }
-
     console.log(`[MEDIA] Agent incoming speaker ${muted ? "MUTED" : "UNMUTED"}`);
     this.notifyStateChange();
   }
@@ -943,10 +906,6 @@ class PlivoWebRTCService {
       audioElem.volume = clamped;
     }
 
-    if (this.speakerGainNode && !this.isSpeakerMuted) {
-      this.speakerGainNode.gain.value = clamped;
-    }
-
     this.notifyStateChange();
   }
 
@@ -958,11 +917,15 @@ class PlivoWebRTCService {
     this.isHold = isHold;
     this.diagnostics.isHold = isHold;
 
-    // 1. Manage local microphone
-    if (this.localStream) {
-      this.localStream.getAudioTracks().forEach((track) => {
-        track.enabled = !isHold && !this.isMuted;
-      });
+    // 1. Manage microphone senders
+    if (isHold) {
+      try {
+        if (typeof this.client?.mute === "function") this.client.mute();
+      } catch {}
+    } else if (!this.isMuted) {
+      try {
+        if (typeof this.client?.unmute === "function") this.client.unmute();
+      } catch {}
     }
 
     activePeerConnections.forEach((pc) => {
@@ -979,10 +942,6 @@ class PlivoWebRTCService {
     const audioElem = document.getElementById("plivo_webrtc_remoteview") as HTMLAudioElement;
     if (audioElem) {
       audioElem.muted = isHold ? true : this.isSpeakerMuted;
-    }
-
-    if (this.speakerGainNode) {
-      this.speakerGainNode.gain.value = isHold ? 0 : (this.isSpeakerMuted ? 0 : this.speakerVolume);
     }
 
     this.setCallState(isHold ? "HOLD" : "RESUMED");
@@ -1010,20 +969,41 @@ class PlivoWebRTCService {
     if (typeof window === "undefined" || !navigator.mediaDevices?.enumerateDevices) {
       return { inputs: [], outputs: [] };
     }
-    const devices = await navigator.mediaDevices.enumerateDevices();
-    return {
-      inputs: devices.filter((d) => d.kind === "audioinput"),
-      outputs: devices.filter((d) => d.kind === "audiooutput"),
-    };
+    try {
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      return {
+        inputs: devices.filter((d) => d.kind === "audioinput"),
+        outputs: devices.filter((d) => d.kind === "audiooutput"),
+      };
+    } catch {
+      return { inputs: [], outputs: [] };
+    }
   }
 
   public async setAudioInputDevice(deviceId: string): Promise<boolean> {
     this.audioInputDeviceId = deviceId;
+    if (this.client?.audio?.microphoneDevices && typeof this.client.audio.microphoneDevices.set === "function") {
+      try {
+        await this.client.audio.microphoneDevices.set(deviceId);
+        console.log(`[MEDIA] Plivo SDK input microphone switched to ${deviceId}`);
+        return true;
+      } catch (err) {
+        console.warn("[MEDIA] Plivo SDK microphone device switch error:", err);
+      }
+    }
     return this.initializeMicrophone();
   }
 
   public async setAudioOutputDevice(deviceId: string): Promise<boolean> {
     this.audioOutputDeviceId = deviceId;
+    if (this.client?.audio?.speakerDevices && typeof this.client.audio.speakerDevices.set === "function") {
+      try {
+        await this.client.audio.speakerDevices.set(deviceId);
+        console.log(`[MEDIA] Plivo SDK speaker switched to ${deviceId}`);
+      } catch (err) {
+        console.warn("[MEDIA] Plivo SDK speaker device switch error:", err);
+      }
+    }
     try {
       const elem = document.getElementById("plivo_webrtc_remoteview") as any;
       if (elem && typeof elem.setSinkId === "function") {
