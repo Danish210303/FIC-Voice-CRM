@@ -535,9 +535,13 @@ class PlivoWebRTCService {
           window.dispatchEvent(new CustomEvent("plivo_webrtc_call_connected", { detail: data }));
         });
 
-        registerOn("onMediaConnected", (stream: any) => {
-          console.log("[PLIVO] onMediaConnected — Remote audio stream confirmed live");
-          this.bindRemoteStream(stream);
+        registerOn("onMediaConnected", (data: any) => {
+          console.log("[PLIVO] onMediaConnected — Remote audio media event received:", data);
+          if (data instanceof MediaStream || (data && data.stream instanceof MediaStream)) {
+            this.bindRemoteStream(data);
+          } else {
+            this.extractAndBindRemoteStream();
+          }
         });
 
         registerOn("onCallTerminated", (data: any) => {
@@ -613,7 +617,7 @@ class PlivoWebRTCService {
     }
 
     if (!stream) {
-      console.warn("[MEDIA] bindRemoteStream: Argument is not a valid MediaStream:", streamOrEvent);
+      this.extractAndBindRemoteStream();
       return;
     }
 
@@ -667,6 +671,31 @@ class PlivoWebRTCService {
 
     window.dispatchEvent(new CustomEvent("plivo_webrtc_media_connected", { detail: { stream } }));
     this.notifyStateChange();
+  }
+
+  public extractAndBindRemoteStream(): void {
+    const audioElem = document.getElementById("plivo_webrtc_remoteview") as HTMLAudioElement;
+    if (audioElem?.srcObject instanceof MediaStream && audioElem.srcObject.getAudioTracks().length > 0) {
+      this.bindRemoteStream(audioElem.srcObject);
+      return;
+    }
+
+    if (this.client?.remoteView?.srcObject instanceof MediaStream && this.client.remoteView.srcObject.getAudioTracks().length > 0) {
+      this.bindRemoteStream(this.client.remoteView.srcObject);
+      return;
+    }
+
+    for (const pc of activePeerConnections) {
+      const receivers = pc.getReceivers();
+      for (const r of receivers) {
+        if (r.track && r.track.kind === "audio" && r.track.readyState === "live") {
+          r.track.enabled = true;
+          const stream = new MediaStream([r.track]);
+          this.bindRemoteStream(stream);
+          return;
+        }
+      }
+    }
   }
 
   /**
