@@ -98,6 +98,24 @@ if (typeof window !== "undefined" && window.RTCPeerConnection && !(window as any
       const pc: RTCPeerConnection = Reflect.construct(target, [config, ...args.slice(1)], newTarget);
       activePeerConnections.add(pc);
 
+      // Safe-guard against duplicate setRemoteDescription on stable signaling state (e.g. 183 Session Progress followed by 200 OK)
+      const originalSetRemoteDescription = pc.setRemoteDescription.bind(pc);
+      pc.setRemoteDescription = async function (description: RTCSessionDescriptionInit) {
+        if (pc.signalingState === "stable" && description && (description.type === "answer" || description.type === "pranswer")) {
+          console.warn(`[WEBRTC] Skipping duplicate setRemoteDescription(${description.type}) on stable signalingState`);
+          return Promise.resolve();
+        }
+        try {
+          return await originalSetRemoteDescription(description);
+        } catch (err: any) {
+          if (err?.name === "InvalidStateError" && pc.signalingState === "stable") {
+            console.warn("[WEBRTC] Handled setRemoteDescription in stable state gracefully");
+            return Promise.resolve();
+          }
+          throw err;
+        }
+      };
+
       pc.addEventListener("icegatheringstatechange", () => {
         console.log(`[WEBRTC ICE] Gathering state: ${pc.iceGatheringState}`);
       });
@@ -144,7 +162,7 @@ if (typeof window !== "undefined" && window.RTCPeerConnection && !(window as any
           plivoWebRTC.bindRemoteStream(remoteStream);
 
           event.track.addEventListener("unmute", () => {
-            console.log(`[WEBRTC TRACK] Audio track unmuted by remote party: id=${event.track.id}`);
+            console.log(`[WEBRTC TRACK] Audio track unmuted: id=${event.track.id}`);
             plivoWebRTC.bindRemoteStream(remoteStream);
           });
         }
@@ -319,11 +337,16 @@ class PlivoWebRTCService {
       elem.autoplay = true;
       elem.setAttribute("playsinline", "true");
       elem.setAttribute("data-devicetype", "speakerDevice");
-      elem.hidden = true;
+      elem.style.position = "absolute";
+      elem.style.left = "-9999px";
+      elem.style.width = "1px";
+      elem.style.height = "1px";
+      elem.style.opacity = "0.01";
       document.body.appendChild(elem);
       console.log(`[MEDIA] Created primary authoritative audio element #${PRIMARY_REMOTE_ID}`);
     }
 
+    elem.hidden = false;
     elem.autoplay = true;
     elem.muted = this.isSpeakerMuted;
     elem.volume = this.speakerVolume;
