@@ -2149,9 +2149,18 @@ async def record_call_disposition(call_id: str, payload: CallDispositionPayload,
         logger.warning(f"[DISPOSITION FOLLOW-UP LINK] {fe}")
 
     # 2. Automatically create a scheduled Follow-Up if agent requested follow-up / callback
-    if payload.follow_up_date or payload.disposition in ["follow_up_required", "call_back"]:
+    if payload.follow_up_date or payload.follow_up_time or payload.disposition in ["follow_up_required", "call_back"]:
         try:
-            fu_time_str = f"{payload.follow_up_date} {payload.follow_up_time}".strip() if payload.follow_up_time else (payload.follow_up_date or "")
+            fu_date_val = (payload.follow_up_date or "").strip()
+            fu_time_val = (payload.follow_up_time or "").strip()
+            if fu_date_val and fu_time_val:
+                if fu_time_val in fu_date_val:
+                    fu_time_str = fu_date_val
+                else:
+                    fu_time_str = f"{fu_date_val} {fu_time_val}".strip()
+            else:
+                fu_time_str = fu_date_val or fu_time_val
+
             fu_dt = parse_datetime_to_utc(fu_time_str) if fu_time_str else (utcnow() + timedelta(hours=24))
             
             cust_name = "Customer"
@@ -2179,6 +2188,7 @@ async def record_call_disposition(call_id: str, payload: CallDispositionPayload,
             agent_name = agent_user.get("name", "Agent") if agent_user else "Agent"
             agent_emp_id = agent_user.get("employee_id", "") if agent_user else ""
 
+            fu_status = "due" if fu_dt <= utcnow() else "scheduled"
             fu_doc = {
                 "customer_id": str(call.get("lead_id") or call.get("phone") or utcnow().timestamp()),
                 "lead_id": str(call.get("lead_id")) if call.get("lead_id") else None,
@@ -2192,7 +2202,7 @@ async def record_call_disposition(call_id: str, payload: CallDispositionPayload,
                 "follow_up_datetime": fu_dt,
                 "reason": payload.notes or f"Follow-up after call ({payload.disposition.replace('_', ' ').title()})",
                 "notes": payload.notes or "",
-                "status": "due" if fu_dt <= utcnow() else "scheduled",
+                "status": fu_status,
                 "priority": "medium",
                 "time_zone": "Asia/Kolkata",
                 "related_call_id": str(call_id),
@@ -2202,20 +2212,42 @@ async def record_call_disposition(call_id: str, payload: CallDispositionPayload,
             }
             ins_fu = await follow_ups_col.insert_one(fu_doc)
             fu_doc["_id"] = ins_fu.inserted_id
+            fu_id_str = str(ins_fu.inserted_id)
             
             await ws_manager.broadcast_global({
                 "event": "FOLLOW_UP_CREATED",
                 "type": "follow_up_created",
-                "follow_up_id": str(ins_fu.inserted_id),
-                "id": str(ins_fu.inserted_id),
+                "follow_up": {
+                    "id": fu_id_str,
+                    "_id": fu_id_str,
+                    "customer_id": fu_doc["customer_id"],
+                    "lead_id": fu_doc["lead_id"],
+                    "customer_name": cust_name,
+                    "customer_phone": cust_phone,
+                    "agent_id": agent_id,
+                    "agent_name": agent_name,
+                    "agent_employee_id": agent_emp_id,
+                    "pool_id": pool_id,
+                    "pool_name": pool_name,
+                    "follow_up_datetime": fu_dt.isoformat(),
+                    "reason": fu_doc["reason"],
+                    "notes": fu_doc["notes"],
+                    "status": fu_status,
+                    "priority": "medium",
+                    "time_zone": "Asia/Kolkata",
+                    "related_call_id": str(call_id),
+                    "created_at": utcnow().isoformat()
+                },
+                "follow_up_id": fu_id_str,
+                "id": fu_id_str,
                 "customer_name": cust_name,
                 "customer_phone": cust_phone,
                 "agent_id": agent_id,
-                "status": fu_doc["status"],
+                "status": fu_status,
                 "scheduled_datetime": fu_dt.isoformat(),
                 "timestamp": utcnow().isoformat()
             })
-            logger.info(f"[DISPOSITION] Created Follow-Up #{ins_fu.inserted_id} for {cust_name} ({cust_phone})")
+            logger.info(f"[DISPOSITION] Created Follow-Up #{ins_fu.inserted_id} for {cust_name} ({cust_phone}) at {fu_dt.isoformat()}")
         except Exception as fue:
             logger.warning(f"[DISPOSITION FOLLOW-UP CREATE WARNING] {fue}")
 
@@ -3517,6 +3549,19 @@ async def end_manual_call(call_id: str, payload: CallEnd, user: dict = Depends(g
                 )
         except Exception as pe:
             logger.warning(f"[MANUAL END PRESENCE] {pe}")
+
+    if payload.outcome and payload.outcome not in ("wrap_up", "live", "ringing"):
+        try:
+            await auto_link_follow_up_on_call_completed(
+                call_id=str(call_id),
+                agent_id=agent_id,
+                phone=call.get("phone") or "",
+                lead_id=str(call.get("lead_id")) if call.get("lead_id") else None,
+                outcome=payload.outcome,
+                notes=payload.notes
+            )
+        except Exception as fe:
+            logger.warning(f"[MANUAL END FOLLOW-UP LINK] {fe}")
 
     await audit_logs_col.insert_one({
         "action": "end_manual_dial",

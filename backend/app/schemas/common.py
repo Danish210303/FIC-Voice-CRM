@@ -1,5 +1,5 @@
 from enum import Enum
-from typing import Optional
+from typing import Optional, Any
 # pyright: ignore[reportMissingImports]
 from pydantic import BaseModel, EmailStr, Field, field_validator
 from datetime import datetime
@@ -208,7 +208,9 @@ class DispositionUpdate(BaseModel):
     status: str
     sub_disposition: Optional[str] = None
     notes: Optional[str] = None
-    follow_up_at: Optional[datetime] = None
+    follow_up_at: Optional[Any] = None
+    follow_up_date: Optional[Any] = None
+    follow_up_time: Optional[str] = None
 
 
 class CallStart(BaseModel):

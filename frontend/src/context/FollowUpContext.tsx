@@ -1,26 +1,67 @@
 import React, { createContext, useContext, useEffect, useState, useCallback, useRef } from "react";
-import { api, getWsUrl } from "../api/client";
+import { api } from "../api/client";
 import { useAuth } from "./AuthContext";
 import { useToast } from "./ToastContext";
+
+export interface FollowUpTimelineItem {
+  id: string;
+  timestamp: string;
+  action: string;
+  description: string;
+  actor: string;
+  actor_role?: string;
+  metadata?: Record<string, any>;
+}
+
+export interface FollowUpAttemptItem {
+  attempt_number: number;
+  call_id?: string;
+  agent_id?: string;
+  agent_name?: string;
+  timestamp: string;
+  status?: string;
+  outcome?: string;
+  duration_seconds?: number;
+  notes?: string;
+}
 
 export interface FollowUpItem {
   id: string;
   _id?: string;
+  follow_up_id?: string;
   customer_id: string;
   lead_id?: string;
   customer_name: string;
   customer_phone: string;
+  phone_number?: string;
+  original_agent_id?: string;
+  original_agent_name?: string;
+  assigned_agent_id?: string;
+  assigned_agent_name?: string;
+  current_agent_id?: string;
+  current_agent_name?: string;
   agent_id: string;
   agent_name: string;
   agent_employee_id?: string;
   pool_id: string;
   pool_name: string;
+  scheduled_at?: string;
   follow_up_datetime: string;
   reason: string;
   notes?: string;
-  status: "scheduled" | "due" | "completed" | "missed" | "cancelled";
+  status:
+    | "scheduled"
+    | "due"
+    | "waiting_for_agent"
+    | "auto_calling"
+    | "connected"
+    | "no_answer"
+    | "completed"
+    | "missed"
+    | "cancelled";
   priority?: "low" | "medium" | "high" | "urgent";
   time_zone?: string;
+  original_call_id?: string;
   related_call_id?: string;
   related_call?: {
     id: string;
@@ -30,6 +71,9 @@ export interface FollowUpItem {
     started_at: string;
     recording_url?: string;
   };
+  timeline?: FollowUpTimelineItem[];
+  attempts?: FollowUpAttemptItem[];
+  call_attempts_count?: number;
   completion_outcome?: string;
   completion_notes?: string;
   created_at: string;
@@ -57,6 +101,8 @@ interface FollowUpContextType {
   createFollowUp: (data: any) => Promise<FollowUpItem | null>;
   updateFollowUp: (id: string, updates: any) => Promise<FollowUpItem | null>;
   completeFollowUp: (id: string, callId?: string, outcome?: string, notes?: string) => Promise<boolean>;
+  triggerAutoCall: (id: string) => Promise<boolean>;
+  reassignFollowUp: (id: string, agentId?: string, poolId?: string, notes?: string) => Promise<boolean>;
   snoozeFollowUp: (id: string, minutes?: number) => Promise<boolean>;
   dismissDueAlert: () => void;
 }
@@ -98,33 +144,31 @@ export function FollowUpProvider({ children }: { children: React.ReactNode }) {
         const s = res.stats || res;
         setStats({
           upcoming: s.upcoming || 0,
-          due_now: s.due || s.due_now || 0,
-          due: s.due || s.due_now || 0,
+          due_now: s.due_now || s.due || 0,
+          due: s.due || 0,
           completed: s.completed || 0,
           missed: s.missed || 0,
-          total: s.total || 0,
+          total: s.total || (s.upcoming || 0) + (s.due || 0) + (s.completed || 0) + (s.missed || 0),
         });
       }
     } catch (err) {
-      console.warn("[FOLLOW-UP] Failed to fetch stats:", err);
+      console.warn("[FOLLOW-UP] Failed to fetch follow-up stats:", err);
     }
   }, [user]);
 
   const fetchFollowUps = useCallback(
-    async (statusFilter: string = "all", search: string = "") => {
+    async (statusFilter?: string, search?: string) => {
       if (!user) return;
+      setLoading(true);
       try {
-        setLoading(true);
-        let url = `/api/follow-ups?limit=150`;
-        if (statusFilter && statusFilter !== "all") {
-          url += `&status=${encodeURIComponent(statusFilter)}`;
-        }
-        if (search) {
-          url += `&search=${encodeURIComponent(search)}`;
-        }
-        const res: any = await api.get(url);
-        const list = Array.isArray(res) ? res : (Array.isArray(res?.data) ? res.data : []);
-        setFollowUps(list);
+        const qParams = new URLSearchParams();
+        qParams.set("limit", "150");
+        if (statusFilter && statusFilter !== "all") qParams.set("status", statusFilter);
+        if (search && search.trim()) qParams.set("search", search.trim());
+
+        const res: any = await api.get(`/api/follow-ups?${qParams.toString()}`);
+        const items = Array.isArray(res) ? res : res?.data || [];
+        setFollowUps(items);
         await fetchStats();
       } catch (err) {
         console.warn("[FOLLOW-UP] Failed to fetch follow-ups:", err);
@@ -208,6 +252,17 @@ export function FollowUpProvider({ children }: { children: React.ReactNode }) {
             created_at: data.timestamp || new Date().toISOString(),
           });
         }
+      } else if (eventType === "FOLLOW_UP_REASSIGNED") {
+        fetchStats();
+        fetchFollowUps();
+        showToast(`Follow-up for ${data.customer_name || "Customer"} reassigned to ${data.reassigned_agent_name || "Agent"}`, "info");
+      } else if (eventType === "FOLLOW_UP_WAITING_FOR_AGENT") {
+        fetchStats();
+        fetchFollowUps();
+      } else if (eventType === "FOLLOW_UP_AUTO_CALLING") {
+        fetchStats();
+        fetchFollowUps();
+        showToast(`🚀 Auto-Callback initiated with ${data.customer_name || "Customer"}`, "info");
       } else if (eventType === "FOLLOW_UP_MISSED") {
         fetchStats();
         fetchFollowUps();
@@ -222,10 +277,12 @@ export function FollowUpProvider({ children }: { children: React.ReactNode }) {
 
     window.addEventListener("crm_ws_message" as any, handleWsEvent);
     window.addEventListener("ws_global_event" as any, handleWsEvent);
+    window.addEventListener("forge_global_ws_msg" as any, handleWsEvent);
 
     return () => {
       window.removeEventListener("crm_ws_message" as any, handleWsEvent);
       window.removeEventListener("ws_global_event" as any, handleWsEvent);
+      window.removeEventListener("forge_global_ws_msg" as any, handleWsEvent);
     };
   }, [user, fetchFollowUps, fetchStats, notifyDueFollowUp, activeDueFollowUp, showToast]);
 
@@ -280,6 +337,41 @@ export function FollowUpProvider({ children }: { children: React.ReactNode }) {
     }
   };
 
+  const triggerAutoCall = async (id: string): Promise<boolean> => {
+    try {
+      const res: any = await api.post(`/api/follow-ups/${id}/trigger-call`);
+      showToast(res?.message || "Auto-callback triggered successfully", "success");
+      await fetchStats();
+      await fetchFollowUps();
+      return true;
+    } catch (err: any) {
+      showToast(err.message || "Failed to trigger auto-call", "error");
+      return false;
+    }
+  };
+
+  const reassignFollowUp = async (
+    id: string,
+    agentId?: string,
+    poolId?: string,
+    notes?: string
+  ): Promise<boolean> => {
+    try {
+      await api.post(`/api/follow-ups/${id}/reassign`, {
+        agent_id: agentId,
+        pool_id: poolId,
+        notes,
+      });
+      showToast("Follow-up reassigned successfully", "success");
+      await fetchStats();
+      await fetchFollowUps();
+      return true;
+    } catch (err: any) {
+      showToast(err.message || "Failed to reassign follow-up", "error");
+      return false;
+    }
+  };
+
   const snoozeFollowUp = async (id: string, minutes: number = 10): Promise<boolean> => {
     try {
       const newTime = new Date(Date.now() + minutes * 60 * 1000).toISOString();
@@ -317,6 +409,8 @@ export function FollowUpProvider({ children }: { children: React.ReactNode }) {
         createFollowUp,
         updateFollowUp,
         completeFollowUp,
+        triggerAutoCall,
+        reassignFollowUp,
         snoozeFollowUp,
         dismissDueAlert,
       }}

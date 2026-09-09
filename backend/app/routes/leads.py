@@ -13,6 +13,7 @@ from app.core.utils import gen_lead_id, gen_import_id, utcnow, oid_str
 from app.core.deps import require_roles, get_current_user
 from app.schemas.common import LeadCreate, LeadAssign, DispositionUpdate, Role, LeadStatus
 from app.services.ws_manager import ws_manager
+from app.services.follow_up_service import create_or_update_lead_follow_up, parse_datetime_to_utc
 
 router = APIRouter(prefix="/api/leads", tags=["leads"])
 
@@ -649,41 +650,73 @@ async def list_imports():
 
 
 @router.patch("/{lead_id}/disposition", dependencies=[Depends(require_roles(Role.AGENT, Role.TEAM_LEADER, Role.ADMIN))])
+@router.patch("/{lead_id}", dependencies=[Depends(require_roles(Role.AGENT, Role.TEAM_LEADER, Role.ADMIN))])
+@router.patch("/{lead_id}/status", dependencies=[Depends(require_roles(Role.AGENT, Role.TEAM_LEADER, Role.ADMIN))])
 async def update_disposition(lead_id: str, payload: DispositionUpdate, user: dict = Depends(get_current_user)):
     query = {"_id": ObjectId(lead_id)} if ObjectId.is_valid(lead_id) else {"lead_id": lead_id}
     lead = await leads_col.find_one(query)
     if not lead:
         raise HTTPException(status.HTTP_404_NOT_FOUND, f"Lead '{lead_id}' not found")
 
+    uid = _uid(user)
     if user.get("role") == Role.AGENT:
-        uid = _uid(user)
-        is_owner = (lead.get("assigned_agent_id") == uid) or (lead.get("created_by") == uid)
+        is_owner = (
+            (lead.get("assigned_agent_id") == uid)
+            or (lead.get("created_by") == uid)
+            or (not lead.get("assigned_agent_id"))
+        )
         if not is_owner:
             raise HTTPException(status.HTTP_403_FORBIDDEN, "You do not have permission to update this lead")
-        
-        # Verify status is new
-        current_status = lead.get("status")
-        if current_status != "new" and current_status != LeadStatus.NEW:
-            raise HTTPException(status.HTTP_403_FORBIDDEN, "Agents can only edit leads in NEW status")
 
     actor_role = (user.get("role") or "User").replace("_", " ").title()
     actor_name = user.get("name") or user.get("email") or "Agent"
-    status_label = payload.status.replace("_", " ").title()
+    norm_status = (payload.status or "in_progress").lower().strip()
+    status_label = norm_status.replace("_", " ").title()
+
+    follow_up_input = payload.follow_up_date or payload.follow_up_at
+    fu_time_str = None
+    if follow_up_input:
+        fu_date_val = str(follow_up_input).strip()
+        fu_time_val = (payload.follow_up_time or "").strip()
+        if fu_time_val and fu_time_val not in fu_date_val:
+            fu_time_str = f"{fu_date_val} {fu_time_val}".strip()
+        else:
+            fu_time_str = fu_date_val
+    elif norm_status in ["follow_up", "follow_up_required", "call_back"]:
+        fu_time_str = (utcnow() + timedelta(hours=24)).strftime("%Y-%m-%d %H:%M")
+
+    fu_record = None
+    if fu_time_str or norm_status in ["follow_up", "follow_up_required", "call_back"]:
+        try:
+            fu_record = await create_or_update_lead_follow_up(
+                lead_id=str(lead.get("_id")),
+                phone=lead.get("phone"),
+                agent_id=uid,
+                follow_up_time_str=fu_time_str,
+                reason=payload.notes or f"Follow-up scheduled ({status_label})",
+                notes=payload.notes or "",
+                current_user_id=uid
+            )
+        except Exception as e:
+            pass
 
     history_entry = {
         "timestamp": utcnow(),
         "action": f"Disposition Updated to {status_label}",
         "actor": f"{actor_name} ({actor_role})",
-        "notes": payload.notes or (f"Follow-up: {payload.follow_up_at}" if payload.follow_up_at else "Status change")
+        "notes": payload.notes or (f"Follow-up: {fu_time_str}" if fu_time_str else "Status change")
     }
 
-    update = {"status": payload.status, "updated_at": utcnow()}
+    update = {"status": norm_status, "updated_at": utcnow()}
     if payload.sub_disposition:
         update["sub_disposition"] = payload.sub_disposition
     if payload.notes:
         update["last_note"] = payload.notes
-    if payload.follow_up_at:
-        update["follow_up_at"] = payload.follow_up_at
+    if fu_time_str:
+        update["follow_up_at"] = fu_time_str
+        update["follow_up_date"] = fu_time_str
+    if fu_record and fu_record.get("id"):
+        update["follow_up_id"] = fu_record["id"]
         
     await leads_col.update_one(
         query,
@@ -700,9 +733,9 @@ async def update_disposition(lead_id: str, payload: DispositionUpdate, user: dic
 
     await audit_logs_col.insert_one({
         "action": "update_disposition",
-        "user_id": _uid(user),
+        "user_id": uid,
         "lead_id": lead_id,
-        "status": payload.status,
+        "status": norm_status,
         "timestamp": utcnow()
     })
 
@@ -713,10 +746,11 @@ async def update_disposition(lead_id: str, payload: DispositionUpdate, user: dic
             "lead_id": str(lead.get("_id")),
             "lead_code": lead.get("lead_id"),
             "history_entry": history_entry,
-            "status": payload.status
+            "status": norm_status,
+            "follow_up": fu_record
         }
     })
-    return {"status": "updated"}
+    return {"status": "updated", "lead_status": norm_status, "follow_up": fu_record}
 
 
 @router.get("/{lead_id}")

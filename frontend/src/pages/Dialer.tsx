@@ -766,6 +766,21 @@ export default function Dialer() {
         setInboundQueue(prev => prev.filter(c => c.id !== data.call_id && c.phone !== cleanPhone));
         showToast(`Inbound Call Connected: Call from ${data.lead_name || 'Customer'} (+91 ${cleanPhone})`, "success");
       }
+      if (data.event === "FOLLOW_UP_AUTO_CALLING" || data.type === "FOLLOW_UP_AUTO_CALLING") {
+        const cleanPhone = (data.phone || "9876543210").replace(/\D/g, "").slice(-10);
+        if (data.call_id) setCurrentCallId(data.call_id);
+        setOutboundPhone(cleanPhone);
+        setDialerMode("outbound");
+        setCallStatus("connected");
+        setAgentStatus("on_call");
+        answeredStartTimeRef.current = Date.now();
+        setCallDuration(0);
+        setIsMuted(false);
+        setIsSpeaker(false);
+        setIsDialing(false);
+        isDialingRef.current = false;
+        showToast(`🔄 Scheduled Auto-Callback Connected: ${data.customer_name || 'Customer'} (+91 ${cleanPhone})`, "info");
+      }
       if (data.event === "inbound_call_queued") {
         const cleanPhone = (data.phone || "9876543210").replace(/\D/g, "").slice(-10);
         const newQueued: QueuedInboundCall = {
@@ -1129,11 +1144,29 @@ export default function Dialer() {
     if (!selectedLead?._id) return;
     setIsSavingSlideOverDisp(true);
     try {
-      await api.patch(`/api/leads/${selectedLead._id}`, {
+      await api.patch(`/api/leads/${selectedLead._id}/disposition`, {
         status,
         notes,
         follow_up_date: followUpDate
       });
+
+      if (followUpDate || status === "call_back" || status === "follow_up_required") {
+        try {
+          await api.post("/api/follow-ups", {
+            customer_id: selectedLead._id,
+            lead_id: selectedLead._id,
+            customer_name: selectedLead.name || "Customer",
+            customer_phone: selectedLead.phone || outboundPhone,
+            agent_id: user?.id,
+            pool_id: selectedLead.pool_id,
+            follow_up_datetime: followUpDate,
+            reason: notes || `Follow-up (${status.replace(/_/g, " ").toUpperCase()})`,
+            notes
+          });
+        } catch (fue) {
+          // Backend patch already handles internal creation fallback
+        }
+      }
 
       if (currentCallId) {
         // Upload audio recording if not already uploaded
@@ -1174,7 +1207,7 @@ export default function Dialer() {
 
   const handleUpdateLeadDisposition = async (leadId: string, status: string, notes: string, followUpDate?: string) => {
     try {
-      await api.patch(`/api/leads/${leadId}`, { status, notes, follow_up_date: followUpDate });
+      await api.patch(`/api/leads/${leadId}/disposition`, { status, notes, follow_up_date: followUpDate });
       showToast("Lead disposition updated successfully", "success");
       fetchLeads();
     } catch (err: any) {
@@ -1700,15 +1733,34 @@ export default function Dialer() {
 
     setIsSavingOutcome(true);
     try {
+      const combinedFollowUp = followUpDate && followUpTime ? `${followUpDate} ${followUpTime}` : (followUpDate || "");
+
       // Step 1: Save call disposition in backend
       if (currentCallId) {
         await api.post(`/api/calls/${currentCallId}/disposition`, {
           disposition,
           duration_seconds: callDuration,
           notes,
-          follow_up_date: followUpDate ? `${followUpDate} ${followUpTime}` : undefined,
+          follow_up_date: followUpDate,
           follow_up_time: followUpTime
         });
+      } else if (disposition === "call_back" || followUpDate) {
+        // Fallback: If no server-side active callId exists, register the follow-up directly
+        try {
+          await api.post("/api/follow-ups", {
+            customer_id: selectedLead?._id,
+            lead_id: selectedLead?._id,
+            customer_name: selectedLead?.name || "Customer",
+            customer_phone: outboundPhone || selectedLead?.phone || "",
+            agent_id: user?.id,
+            pool_id: selectedLead?.pool_id,
+            follow_up_datetime: combinedFollowUp,
+            reason: notes || "Call Back Scheduled from Dialer",
+            notes
+          });
+        } catch (fue) {
+          console.warn("[Dialer] Follow-up direct creation fallback:", fue);
+        }
       }
 
       // Step 2: Update lead status in real time if selected
@@ -1720,10 +1772,11 @@ export default function Dialer() {
         else if (disposition === "dnc") newLeadStatus = "closed";
 
         try {
-          await api.patch(`/api/leads/${selectedLead._id}`, {
+          await api.patch(`/api/leads/${selectedLead._id}/disposition`, {
             status: newLeadStatus,
             notes,
-            follow_up_date: followUpDate
+            follow_up_date: combinedFollowUp,
+            follow_up_time: followUpTime
           });
         } catch (err) {
           console.warn("Lead patch warning:", err);
