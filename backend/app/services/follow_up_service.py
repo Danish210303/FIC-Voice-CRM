@@ -1,10 +1,14 @@
+import os
 import asyncio
 import logging
 import uuid
+from urllib.parse import quote
 from datetime import datetime, timezone, timedelta
 from typing import Optional, Dict, Any, List
 from bson import ObjectId
 
+from app.core.config import settings
+from app.core.http import get_http_client
 from app.core.database import follow_ups_col, leads_col, users_col, calls_col, pools_col, notifications_col, audit_logs_col
 from app.core.utils import utcnow, oid_str, normalize_phone
 from app.services.ws_manager import ws_manager
@@ -594,6 +598,43 @@ async def initiate_auto_callback_for_agent(
         }
     )
 
+    # Trigger Real Plivo Outbound Call Bridging (Agent-First Click-to-Call)
+    plivo_auth_id = getattr(settings, 'PLIVO_AUTH_ID', '') or os.getenv('PLIVO_AUTH_ID', '')
+    plivo_auth_token = getattr(settings, 'PLIVO_AUTH_TOKEN', '') or os.getenv('PLIVO_AUTH_TOKEN', '')
+    plivo_phone_number = getattr(settings, 'PLIVO_PHONE_NUMBER', '+918031826757')
+    base_url = getattr(settings, 'BASE_URL', '') or os.getenv('BASE_URL', 'https://fic-voice-crm.onrender.com')
+
+    agent_phone_val = agent_user.get("agent_phone") or agent_user.get("phone") or ""
+    clean_agent_phone = normalize_phone(agent_phone_val) if agent_phone_val else ""
+    norm_cust_phone = normalize_phone(customer_phone) if customer_phone else ""
+
+    if plivo_auth_id and plivo_auth_token and norm_cust_phone:
+        try:
+            plivo_url = f"https://api.plivo.com/v1/Account/{plivo_auth_id}/Call/"
+            if clean_agent_phone:
+                primary_dest = clean_agent_phone.replace("+", "")
+                bridge_dest = norm_cust_phone
+            else:
+                primary_dest = norm_cust_phone.replace("+", "")
+                bridge_dest = ""
+
+            plivo_body = {
+                "from": plivo_phone_number.replace("+", ""),
+                "to": primary_dest,
+                "answer_url": f"{base_url}/api/calls/plivo/answer?dial_to={quote(bridge_dest)}&agent_phone={quote(clean_agent_phone)}",
+                "answer_method": "POST",
+                "hangup_url": f"{base_url}/api/calls/plivo/status",
+                "hangup_method": "POST",
+            }
+            client = get_http_client()
+            res = await client.post(plivo_url, json=plivo_body, auth=(plivo_auth_id, plivo_auth_token), timeout=10.0)
+            if res.status_code in (200, 201, 202):
+                logger.info(f"[AUTO-CALL PLIVO BRIDGE] Placed outbound call to {primary_dest} (bridge {bridge_dest}): {res.json()}")
+            else:
+                logger.warning(f"[AUTO-CALL PLIVO BRIDGE] API response {res.status_code}: {res.text}")
+        except Exception as plivo_err:
+            logger.warning(f"[AUTO-CALL PLIVO BRIDGE ERROR] {plivo_err}")
+
     # Broadcast WebSocket Event to target agent console & supervisor dashboard
     auto_call_event = {
         "event": "FOLLOW_UP_AUTO_CALLING",
@@ -632,6 +673,7 @@ async def initiate_auto_callback_for_agent(
 
     logger.info(f"[AUTO-CALL ENGINE] Successfully started call #{call_id} for Follow-Up #{fu_id} -> Agent {agent_name} ({agent_id})")
     return call_doc
+
 
 
 async def process_scheduled_auto_calls() -> Dict[str, Any]:
