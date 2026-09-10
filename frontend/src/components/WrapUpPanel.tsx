@@ -10,7 +10,7 @@ import {
   AlertCircle,
   User
 } from "lucide-react";
-import { getCurrentISTInputs } from "../utils/dateUtils";
+import { getCurrentISTInputs, isFutureISTDateTime } from "../utils/dateUtils";
 
 export interface WrapUpLead {
   _id?: string;
@@ -107,18 +107,38 @@ export const WrapUpPanel: React.FC<WrapUpPanelProps> = ({
 }) => {
   const MAX_NOTES_LEN = 300;
 
-  // Validation: valid disposition selected + if call_back then requires follow-up date and time
+  // Validation: valid disposition selected + if call_back then requires future follow-up date and time in Asia/Kolkata
   const isFormValid = useMemo(() => {
     if (!disposition) return false;
     if (disposition === "call_back") {
-      return Boolean(followUpDate.trim() && followUpTime.trim());
+      if (!followUpDate.trim() || !followUpTime.trim()) return false;
+      return isFutureISTDateTime(followUpDate, followUpTime);
     }
     return true;
   }, [disposition, followUpDate, followUpTime]);
 
+  const isPastDateTime = useMemo(() => {
+    if (disposition === "call_back" && followUpDate.trim() && followUpTime.trim()) {
+      return !isFutureISTDateTime(followUpDate, followUpTime);
+    }
+    return false;
+  }, [disposition, followUpDate, followUpTime]);
+
+  const handleSelectDisposition = (val: string) => {
+    setDisposition(val);
+    if (val === "call_back") {
+      if (!followUpDate || !followUpTime) {
+        const nextHour = getCurrentISTInputs(60);
+        if (!followUpDate) setFollowUpDate(nextHour.date);
+        if (!followUpTime) setFollowUpTime(nextHour.time);
+      }
+    }
+  };
+
   const displayPhone = maskedPhone || phone || "Unknown Phone";
   const displayName = lead?.name || "Customer Lead";
   const todayStr = getCurrentISTInputs().date;
+
 
   return (
     <div className="w-full bg-white dark:bg-[#0f172a] rounded-xl border border-slate-200 dark:border-slate-800 shadow-sm p-3.5 sm:p-4 space-y-3 font-sans transition-all">
@@ -196,7 +216,7 @@ export const WrapUpPanel: React.FC<WrapUpPanelProps> = ({
               <button
                 key={chip.val}
                 type="button"
-                onClick={() => setDisposition(chip.val)}
+                onClick={() => handleSelectDisposition(chip.val)}
                 className={`h-9 px-1 rounded-lg text-[11px] font-bold border transition-all cursor-pointer text-center truncate flex items-center justify-center gap-1 ${
                   isSelected
                     ? chip.activeCls
@@ -221,35 +241,46 @@ export const WrapUpPanel: React.FC<WrapUpPanelProps> = ({
               Schedule Call Back <span className="text-rose-500">*</span>
             </span>
             <span className="text-[9px] text-amber-600/80 dark:text-amber-400/70">
-              Required for Callback
+              Required for Callback (IST)
             </span>
           </div>
 
           <div className="grid grid-cols-2 gap-2">
             <div>
               <label className="block text-[9px] font-bold text-slate-500 dark:text-slate-400 uppercase mb-0.5">
-                Date
+                Date (Asia/Kolkata)
               </label>
               <input
                 type="date"
                 min={todayStr}
                 value={followUpDate}
                 onChange={e => setFollowUpDate(e.target.value)}
-                className="w-full h-8 px-2 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-md text-xs font-semibold text-slate-900 dark:text-white outline-none focus:border-amber-500 transition"
+                className={`w-full h-8 px-2 bg-white dark:bg-slate-800 border rounded-md text-xs font-semibold text-slate-900 dark:text-white outline-none transition ${
+                  isPastDateTime ? "border-rose-500 focus:border-rose-600" : "border-slate-200 dark:border-slate-700 focus:border-amber-500"
+                }`}
               />
             </div>
             <div>
               <label className="block text-[9px] font-bold text-slate-500 dark:text-slate-400 uppercase mb-0.5">
-                Time
+                Time (IST)
               </label>
               <input
                 type="time"
                 value={followUpTime}
                 onChange={e => setFollowUpTime(e.target.value)}
-                className="w-full h-8 px-2 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-md text-xs font-semibold text-slate-900 dark:text-white outline-none focus:border-amber-500 transition"
+                className={`w-full h-8 px-2 bg-white dark:bg-slate-800 border rounded-md text-xs font-semibold text-slate-900 dark:text-white outline-none transition ${
+                  isPastDateTime ? "border-rose-500 focus:border-rose-600" : "border-slate-200 dark:border-slate-700 focus:border-amber-500"
+                }`}
               />
             </div>
           </div>
+
+          {isPastDateTime && (
+            <p className="text-[10px] text-rose-600 dark:text-rose-400 font-semibold flex items-center gap-1 pt-0.5">
+              <AlertCircle className="w-3 h-3 shrink-0" />
+              Scheduled time must be in the future (Asia/Kolkata).
+            </p>
+          )}
         </div>
       )}
 
@@ -299,6 +330,8 @@ export const WrapUpPanel: React.FC<WrapUpPanelProps> = ({
             <AlertCircle className="w-3 h-3" />
             {!disposition
               ? "Select a disposition outcome to proceed"
+              : isPastDateTime
+              ? "Please select a valid future date & time in Asia/Kolkata"
               : "Select follow-up date and time for Call Back"}
           </p>
         )}

@@ -1,9 +1,10 @@
-import { useEffect, useState, useCallback, useRef } from "react";
+import { useEffect, useState, useCallback, useRef, useMemo } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { api, BASE_URL } from "../api/client";
 import { useAuth } from "../context/AuthContext";
 import { useToast } from "../context/ToastContext";
 import { CustomSelect } from "../components/CustomSelect";
+import { parseToDate, IST_TIMEZONE } from "../utils/dateUtils";
 
 type CallHistoryRow = {
   id: string;
@@ -25,6 +26,8 @@ import {
   BarChart3,
   Users,
   PhoneCall,
+  PhoneIncoming,
+  PhoneOutgoing,
   CheckCircle2,
   Clock,
   TrendingUp,
@@ -37,8 +40,102 @@ import {
   PieChart,
   Activity,
   UserCheck,
-  Megaphone
+  Megaphone,
+  Filter,
+  ExternalLink,
+  Copy,
+  Check,
 } from "lucide-react";
+
+function formatDurationHMS(seconds: number | undefined | null): string {
+  const s = Math.max(0, Math.floor(seconds || 0));
+  const mins = Math.floor(s / 60);
+  const secs = s % 60;
+  const hours = Math.floor(mins / 60);
+  if (hours > 0) {
+    const remMins = mins % 60;
+    return `${String(hours).padStart(2, "0")}:${String(remMins).padStart(2, "0")}:${String(secs).padStart(2, "0")}`;
+  }
+  return `${String(mins).padStart(2, "0")}:${String(secs).padStart(2, "0")}`;
+}
+
+function formatCallTimestamp(input: string | Date | undefined | null): string {
+  if (!input) return "Recently";
+  const date = parseToDate(input);
+  if (!date) return String(input);
+  try {
+    const formatter = new Intl.DateTimeFormat("en-IN", {
+      timeZone: IST_TIMEZONE,
+      day: "2-digit",
+      month: "short",
+      year: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: true,
+    });
+    const parts = formatter.formatToParts(date);
+    const day = parts.find((p) => p.type === "day")?.value || "";
+    let month = parts.find((p) => p.type === "month")?.value || "";
+    const year = parts.find((p) => p.type === "year")?.value || "";
+    const hour = parts.find((p) => p.type === "hour")?.value || "";
+    const minute = parts.find((p) => p.type === "minute")?.value || "";
+    const dayPeriod = (parts.find((p) => p.type === "dayPeriod")?.value || "AM").toUpperCase();
+
+    return `${day} ${month} ${year} • ${hour}:${minute} ${dayPeriod} IST`;
+  } catch {
+    return date.toLocaleString("en-IN", { timeZone: IST_TIMEZONE });
+  }
+}
+
+function getCallOutcomeVisuals(outcomeStr: string) {
+  const s = (outcomeStr || "").toLowerCase().trim();
+  if (s.includes("stale") || s.includes("clean")) {
+    return {
+      label: "STALE AUTO CLEANED",
+      bg: "bg-slate-100 text-slate-500 border-slate-200/90 dark:bg-slate-800/80 dark:text-slate-400 dark:border-slate-700",
+      dot: "bg-slate-400",
+      isSystemCleaned: true,
+    };
+  }
+  if (s.includes("call_back") || s.includes("callback")) {
+    return {
+      label: "CALL BACK",
+      bg: "bg-amber-50 text-amber-700 border-amber-200/90 dark:bg-amber-500/15 dark:text-amber-400 dark:border-amber-500/30",
+      dot: "bg-amber-500",
+      isSystemCleaned: false,
+    };
+  }
+  if (s.includes("completed") || s.includes("answered") || s.includes("connected")) {
+    return {
+      label: outcomeStr.toUpperCase().replace(/_/g, " "),
+      bg: "bg-emerald-50 text-emerald-700 border-emerald-200/90 dark:bg-emerald-500/15 dark:text-emerald-400 dark:border-emerald-500/30",
+      dot: "bg-emerald-500",
+      isSystemCleaned: false,
+    };
+  }
+  if (s.includes("interested") || s.includes("won") || s.includes("sale")) {
+    return {
+      label: outcomeStr.toUpperCase().replace(/_/g, " "),
+      bg: "bg-teal-50 text-teal-700 border-teal-200/90 dark:bg-teal-500/15 dark:text-teal-400 dark:border-teal-500/30",
+      dot: "bg-teal-500",
+      isSystemCleaned: false,
+    };
+  }
+  if (s.includes("no_answer") || s.includes("missed") || s.includes("failed") || s.includes("busy") || s.includes("cancel")) {
+    return {
+      label: outcomeStr.toUpperCase().replace(/_/g, " "),
+      bg: "bg-rose-50 text-rose-700 border-rose-200/90 dark:bg-rose-500/15 dark:text-rose-400 dark:border-rose-500/30",
+      dot: "bg-rose-500",
+      isSystemCleaned: false,
+    };
+  }
+  return {
+    label: (outcomeStr || "LOGGED").toUpperCase().replace(/_/g, " "),
+    bg: "bg-blue-50 text-blue-700 border-blue-200/90 dark:bg-blue-500/15 dark:text-blue-400 dark:border-blue-500/30",
+    dot: "bg-blue-500",
+    isSystemCleaned: false,
+  };
+}
 
 type AgentPerf = {
   agent_id: string;
@@ -157,6 +254,82 @@ export default function Reports() {
   const [importData, setImportData] = useState<LeadImport[]>([]);
   const [campaignData, setCampaignData] = useState<CampaignReport[]>([]);
   const [callsData, setCallsData] = useState<CallHistoryRow[]>([]);
+
+  // Call History Filters & Sorting
+  const [callDirectionFilter, setCallDirectionFilter] = useState<"all" | "inbound" | "outbound">("all");
+  const [callOutcomeFilter, setCallOutcomeFilter] = useState<"all" | "completed" | "call_back" | "interested" | "no_answer" | "stale_auto_cleaned">("all");
+  const [callDurationFilter, setCallDurationFilter] = useState<"all" | "connected" | "gt_30" | "gt_60">("all");
+  const [callSortBy, setCallSortBy] = useState<"newest" | "oldest" | "duration_desc" | "duration_asc">("newest");
+  const [selectedCallModal, setSelectedCallModal] = useState<CallHistoryRow | null>(null);
+
+  const filteredCalls = useMemo(() => {
+    let list = [...callsData];
+
+    // Search filter
+    if (searchQuery.trim()) {
+      const q = searchQuery.toLowerCase().trim();
+      list = list.filter(
+        c =>
+          (c.id || "").toLowerCase().includes(q) ||
+          (c.lead_id || "").toLowerCase().includes(q) ||
+          (c.notes || "").toLowerCase().includes(q) ||
+          (c.outcome || "").toLowerCase().includes(q) ||
+          (c.agent_name || "").toLowerCase().includes(q)
+      );
+    }
+
+    // Direction filter
+    if (callDirectionFilter !== "all") {
+      list = list.filter(c => (c.direction || "outbound").toLowerCase() === callDirectionFilter);
+    }
+
+    // Outcome filter
+    if (callOutcomeFilter !== "all") {
+      list = list.filter(c => {
+        const o = (c.outcome || "").toLowerCase();
+        if (callOutcomeFilter === "completed") return o.includes("completed") || o.includes("answered") || o.includes("connected");
+        if (callOutcomeFilter === "call_back") return o.includes("call_back") || o.includes("callback");
+        if (callOutcomeFilter === "interested") return o.includes("interested") || o.includes("won") || o.includes("sale");
+        if (callOutcomeFilter === "no_answer") return o.includes("no_answer") || o.includes("missed") || o.includes("failed") || o.includes("busy");
+        if (callOutcomeFilter === "stale_auto_cleaned") return o.includes("stale") || o.includes("clean");
+        return true;
+      });
+    }
+
+    // Duration filter
+    if (callDurationFilter !== "all") {
+      list = list.filter(c => {
+        const d = c.duration_seconds || 0;
+        if (callDurationFilter === "connected") return d > 0;
+        if (callDurationFilter === "gt_30") return d >= 30;
+        if (callDurationFilter === "gt_60") return d >= 60;
+        return true;
+      });
+    }
+
+    // Sorting
+    list.sort((a, b) => {
+      if (callSortBy === "newest") {
+        const ta = a.started_at ? new Date(a.started_at).getTime() : 0;
+        const tb = b.started_at ? new Date(b.started_at).getTime() : 0;
+        return tb - ta;
+      }
+      if (callSortBy === "oldest") {
+        const ta = a.started_at ? new Date(a.started_at).getTime() : 0;
+        const tb = b.started_at ? new Date(b.started_at).getTime() : 0;
+        return ta - tb;
+      }
+      if (callSortBy === "duration_desc") {
+        return (b.duration_seconds || 0) - (a.duration_seconds || 0);
+      }
+      if (callSortBy === "duration_asc") {
+        return (a.duration_seconds || 0) - (b.duration_seconds || 0);
+      }
+      return 0;
+    });
+
+    return list;
+  }, [callsData, searchQuery, callDirectionFilter, callOutcomeFilter, callDurationFilter, callSortBy]);
   
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -616,97 +789,272 @@ export default function Reports() {
                 </tbody>
               </table>
             )}
-
             {/* 4. CALL ANALYTICS / CALL LOGS TABLE */}
             {reportType === "call_analytics" && (
-              <table className="w-full text-xs text-left border-collapse">
-                <thead className="bg-[#F8FAFC] dark:bg-[#1A2740] text-[#64748B] dark:text-[#94A3B8] font-bold uppercase tracking-wider text-[11px] sticky top-0 z-10">
-                  <tr className="h-10 border-b border-slate-200/80 dark:border-white/[0.06]">
-                    <th className="px-3.5 py-2">Call ID</th>
-                    <th className="px-3.5 py-2">Lead / Channel</th>
-                    <th className="px-3.5 py-2 text-center">Direction</th>
-                    <th className="px-3.5 py-2 text-center">Duration</th>
-                    <th className="px-3.5 py-2 text-center">Outcome Status</th>
-                    <th className="px-3.5 py-2">Started At</th>
-                    <th className="px-3.5 py-2">Notes &amp; Disposition</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-100 dark:divide-white/[0.04]">
-                  {callsData
-                    .filter(c => {
-                      const q = searchQuery.toLowerCase();
-                      return (
-                        !q ||
-                        (c.id || "").toLowerCase().includes(q) ||
-                        (c.lead_id || "").toLowerCase().includes(q) ||
-                        (c.notes || "").toLowerCase().includes(q) ||
-                        (c.outcome || "").toLowerCase().includes(q)
-                      );
-                    })
-                    .map((c, idx) => {
-                      const outcomeLower = (c.outcome || "completed").toLowerCase();
-                      const directionLower = (c.direction || "outbound").toLowerCase();
-                      return (
-                        <tr 
-                          key={c.id} 
-                          className={`h-[52px] transition-all duration-150 cursor-pointer ${
-                            idx % 2 === 0 ? "bg-white dark:bg-[#131C2F]" : "bg-slate-50/50 dark:bg-[#172338]"
-                          } hover:bg-blue-50/60 dark:hover:bg-[#2563EB]/10`}
-                        >
-                          <td className="px-3.5 py-2 font-mono font-bold">
-                            <span className="bg-blue-50 dark:bg-[#2563EB]/10 border border-blue-200 dark:border-[#2563EB]/20 text-[#2563EB] dark:text-[#60A5FA] px-2 py-0.5 rounded-[6px] text-[11px]">
-                              Call #{c.id.slice(-6).toUpperCase()}
-                            </span>
-                          </td>
-                          <td className="px-3.5 py-2 font-mono font-bold text-slate-900 dark:text-[#F8FAFC]">
-                            {c.lead_id || "N/A"}
-                          </td>
-                          <td className="px-3.5 py-2 text-center">
-                            <span className={`text-[10.5px] font-semibold uppercase px-2 py-0.5 rounded-[6px] border ${
-                              directionLower === "inbound" 
-                                ? "bg-blue-50 text-[#2563EB] border-blue-200/80 dark:bg-[#2563EB]/15 dark:border-[#2563EB]/30 dark:text-[#60A5FA]" 
-                                : "bg-purple-50 text-purple-700 border-purple-200/80 dark:bg-[#8B5CF6]/15 dark:border-[#8B5CF6]/30 dark:text-[#C084FC]"
-                            }`}>
-                              {c.direction || "outbound"}
-                            </span>
-                          </td>
-                          <td className="px-3.5 py-2 text-center font-mono font-bold text-slate-900 dark:text-[#F8FAFC]">
-                            {Math.floor((c.duration_seconds || 0) / 60)}m {(c.duration_seconds || 0) % 60}s
-                          </td>
-                          <td className="px-3.5 py-2 text-center">
-                            <span className={`text-[10.5px] font-semibold uppercase px-2 py-0.5 rounded-[6px] border ${
-                              outcomeLower === "completed"
-                                ? "bg-emerald-50 text-emerald-700 border-emerald-200/80 dark:bg-[#10B981]/15 dark:border-[#10B981]/30 dark:text-[#34D399]"
-                                : outcomeLower === "answered"
-                                ? "bg-emerald-50 text-emerald-700 border-emerald-200/80 dark:bg-[#059669]/15 dark:border-[#059669]/30 dark:text-[#34D399]"
-                                : outcomeLower === "missed" || outcomeLower === "failed" || outcomeLower === "no_answer"
-                                ? "bg-rose-50 text-rose-700 border-rose-200/80 dark:bg-[#EF4444]/15 dark:border-[#EF4444]/30 dark:text-[#F87171]"
-                                : outcomeLower === "busy"
-                                ? "bg-amber-50 text-amber-700 border-amber-200/80 dark:bg-[#F59E0B]/15 dark:border-[#F59E0B]/30 dark:text-[#FBBF24]"
-                                : "bg-slate-100 border border-slate-200 text-slate-600 dark:bg-white/[0.04] dark:border-white/[0.08] dark:text-[#CBD5E1]"
-                            }`}>
-                              {c.outcome || "completed"}
-                            </span>
-                          </td>
-                          <td className="px-3.5 py-2 text-slate-900 dark:text-[#F8FAFC] font-semibold text-xs">
-                            {c.started_at ? new Date(c.started_at).toLocaleString() : "Recently"}
-                          </td>
-                          <td className="px-3.5 py-2 text-slate-600 dark:text-[#CBD5E1] font-medium text-xs max-w-xs truncate">
-                            {c.notes || "No call notes recorded."}
+              <div className="space-y-3">
+                {/* Dedicated Call History Filters Toolbar */}
+                <div className="flex flex-wrap items-center justify-between gap-2.5 p-3 bg-slate-50 dark:bg-[#1A2740] rounded-[10px] border border-slate-200/80 dark:border-white/[0.06] text-xs">
+                  <div className="flex flex-wrap items-center gap-2.5">
+                    {/* Direction Filter */}
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-[10.5px] font-bold text-slate-500 uppercase tracking-wider">Direction:</span>
+                      <select
+                        value={callDirectionFilter}
+                        onChange={e => setCallDirectionFilter(e.target.value as any)}
+                        className="h-8 px-2.5 rounded-lg border border-slate-200 dark:border-white/10 bg-white dark:bg-[#111827] text-slate-800 dark:text-white font-semibold text-xs focus:outline-none cursor-pointer shadow-2xs"
+                      >
+                        <option value="all">All Directions</option>
+                        <option value="inbound">Inbound Only</option>
+                        <option value="outbound">Outbound Only</option>
+                      </select>
+                    </div>
+
+                    {/* Outcome Filter */}
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-[10.5px] font-bold text-slate-500 uppercase tracking-wider">Outcome:</span>
+                      <select
+                        value={callOutcomeFilter}
+                        onChange={e => setCallOutcomeFilter(e.target.value as any)}
+                        className="h-8 px-2.5 rounded-lg border border-slate-200 dark:border-white/10 bg-white dark:bg-[#111827] text-slate-800 dark:text-white font-semibold text-xs focus:outline-none cursor-pointer shadow-2xs"
+                      >
+                        <option value="all">All Outcomes</option>
+                        <option value="completed">Completed / Answered</option>
+                        <option value="call_back">Call Back</option>
+                        <option value="interested">Interested / Won</option>
+                        <option value="no_answer">No Answer / Missed</option>
+                        <option value="stale_auto_cleaned">Stale Auto Cleaned</option>
+                      </select>
+                    </div>
+
+                    {/* Duration Filter */}
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-[10.5px] font-bold text-slate-500 uppercase tracking-wider">Duration:</span>
+                      <select
+                        value={callDurationFilter}
+                        onChange={e => setCallDurationFilter(e.target.value as any)}
+                        className="h-8 px-2.5 rounded-lg border border-slate-200 dark:border-white/10 bg-white dark:bg-[#111827] text-slate-800 dark:text-white font-semibold text-xs focus:outline-none cursor-pointer shadow-2xs"
+                      >
+                        <option value="all">All Durations</option>
+                        <option value="connected">&gt; 0s (Connected)</option>
+                        <option value="gt_30">&ge; 30s</option>
+                        <option value="gt_60">&ge; 1 min</option>
+                      </select>
+                    </div>
+                  </div>
+
+                  {/* Sort By & Record Counter */}
+                  <div className="flex items-center gap-2 ml-auto">
+                    <span className="text-[10.5px] font-bold text-slate-500 uppercase tracking-wider">Sort:</span>
+                    <select
+                      value={callSortBy}
+                      onChange={e => setCallSortBy(e.target.value as any)}
+                      className="h-8 px-2.5 rounded-lg border border-slate-200 dark:border-white/10 bg-white dark:bg-[#111827] text-slate-800 dark:text-white font-semibold text-xs focus:outline-none cursor-pointer shadow-2xs"
+                    >
+                      <option value="newest">Newest First (IST)</option>
+                      <option value="oldest">Oldest First (IST)</option>
+                      <option value="duration_desc">Duration (High → Low)</option>
+                      <option value="duration_asc">Duration (Low → High)</option>
+                    </select>
+
+                    <span className="px-2.5 py-1 rounded-lg bg-slate-200/80 dark:bg-white/10 text-[11px] font-mono font-bold text-slate-700 dark:text-slate-300">
+                      {filteredCalls.length} calls
+                    </span>
+                  </div>
+                </div>
+
+                <div className="overflow-x-auto max-h-[580px] relative rounded-[10px] border border-slate-200/80 dark:border-white/[0.08]">
+                  <table className="w-full text-xs text-left border-collapse">
+                    <thead className="bg-[#F8FAFC]/95 dark:bg-[#1A2740]/95 backdrop-blur-xs text-[#64748B] dark:text-[#94A3B8] font-bold uppercase tracking-wider text-[10.5px] sticky top-0 z-10 shadow-2xs border-b border-slate-200/80 dark:border-white/[0.06]">
+                      <tr className="h-10">
+                        <th className="px-3.5 py-2 w-[12%]">Call ID</th>
+                        <th className="px-3.5 py-2 w-[16%]">Lead / Channel</th>
+                        <th className="px-3.5 py-2 text-center w-[10%]">Direction</th>
+                        <th className="px-3.5 py-2 text-center w-[10%]">Duration</th>
+                        <th className="px-3.5 py-2 text-center w-[14%]">Outcome Status</th>
+                        <th className="px-3.5 py-2 w-[16%]">Started At</th>
+                        <th className="px-3.5 py-2 w-[22%]">Notes &amp; Disposition</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100 dark:divide-white/[0.04] font-medium">
+                      {filteredCalls.map((c, idx) => {
+                        const outcomeVisual = getCallOutcomeVisuals(c.outcome);
+                        const isOutbound = (c.direction || "outbound").toLowerCase() === "outbound";
+                        const shortCallId = c.id ? `#${c.id.slice(-6).toUpperCase()}` : "N/A";
+                        const shortLeadId = c.lead_id && c.lead_id.length > 14
+                          ? `${c.lead_id.slice(0, 8)}...${c.lead_id.slice(-6)}`
+                          : (c.lead_id || "Direct / Inbound");
+
+                        return (
+                          <tr
+                            key={c.id || idx}
+                            onClick={() => setSelectedCallModal(c)}
+                            className={`h-[40px] transition-all duration-150 cursor-pointer ${
+                              outcomeVisual.isSystemCleaned
+                                ? "bg-slate-50/40 dark:bg-slate-900/30 text-slate-500"
+                                : idx % 2 === 0
+                                ? "bg-white dark:bg-[#131C2F]"
+                                : "bg-slate-50/50 dark:bg-[#172338]"
+                            } hover:bg-blue-50/60 dark:hover:bg-[#2563EB]/10`}
+                          >
+                            {/* 1. Call ID */}
+                            <td className="px-3.5 py-2 font-mono font-bold align-middle">
+                              <span
+                                className="inline-flex items-center gap-1 bg-blue-50 hover:bg-blue-100 dark:bg-[#2563EB]/15 dark:hover:bg-[#2563EB]/25 border border-blue-200 dark:border-[#2563EB]/30 text-[#2563EB] dark:text-[#60A5FA] px-2 py-0.5 rounded-[6px] text-[11px] transition shadow-2xs"
+                                title={`Full Call ID: ${c.id} (Click to view details)`}
+                              >
+                                Call {shortCallId}
+                              </span>
+                            </td>
+
+                            {/* 2. Lead / Channel */}
+                            <td className="px-3.5 py-2 font-mono font-semibold text-slate-800 dark:text-[#F8FAFC] align-middle">
+                              <span className="truncate block max-w-[150px]" title={`Lead / Channel ID: ${c.lead_id || "N/A"}`}>
+                                {shortLeadId}
+                              </span>
+                            </td>
+
+                            {/* 3. Direction */}
+                            <td className="px-3.5 py-2 text-center align-middle">
+                              <span
+                                className={`inline-flex items-center gap-1 text-[10px] font-bold uppercase px-2 py-0.5 rounded-[6px] border ${
+                                  !isOutbound
+                                    ? "bg-blue-50 text-[#2563EB] border-blue-200/80 dark:bg-[#2563EB]/15 dark:border-[#2563EB]/30 dark:text-[#60A5FA]"
+                                    : "bg-purple-50 text-purple-700 border-purple-200/80 dark:bg-[#8B5CF6]/15 dark:border-[#8B5CF6]/30 dark:text-[#C084FC]"
+                                }`}
+                              >
+                                {!isOutbound ? <PhoneIncoming className="h-2.5 w-2.5" /> : <PhoneOutgoing className="h-2.5 w-2.5" />}
+                                <span>{c.direction || "OUTBOUND"}</span>
+                              </span>
+                            </td>
+
+                            {/* 4. Duration */}
+                            <td className="px-3.5 py-2 text-center font-mono font-bold text-slate-800 dark:text-[#F8FAFC] align-middle text-[12px]">
+                              {formatDurationHMS(c.duration_seconds)}
+                            </td>
+
+                            {/* 5. Outcome Status */}
+                            <td className="px-3.5 py-2 text-center align-middle">
+                              <span
+                                className={`inline-flex items-center gap-1 text-[10px] font-bold uppercase px-2 py-0.5 rounded-[6px] border ${outcomeVisual.bg}`}
+                              >
+                                <span className={`h-1.5 w-1.5 rounded-full ${outcomeVisual.dot}`} />
+                                <span>{outcomeVisual.label}</span>
+                              </span>
+                            </td>
+
+                            {/* 6. Started At */}
+                            <td className="px-3.5 py-2 text-slate-800 dark:text-[#F8FAFC] font-semibold text-[11.5px] font-mono align-middle">
+                              {formatCallTimestamp(c.started_at)}
+                            </td>
+
+                            {/* 7. Notes & Disposition */}
+                            <td className="px-3.5 py-2 text-slate-600 dark:text-[#CBD5E1] font-medium text-xs align-middle">
+                              <div className="max-w-[260px] truncate" title={c.notes || "No call notes recorded."}>
+                                {c.notes || (outcomeVisual.isSystemCleaned ? "Session cleaned after inactivity window." : "No call notes recorded.")}
+                              </div>
+                            </td>
+                          </tr>
+                        );
+                      })}
+
+                      {filteredCalls.length === 0 && !error && (
+                        <tr>
+                          <td colSpan={7} className="px-3.5 py-10 text-center text-slate-400 dark:text-[#94A3B8] font-medium">
+                            <PhoneCall className="h-7 w-7 mx-auto mb-2 text-slate-300 dark:text-slate-600" />
+                            No call history records match the selected filter.
                           </td>
                         </tr>
-                      );
-                    })}
-                  {callsData.length === 0 && !error && (
-                    <tr>
-                      <td colSpan={7} className="px-3.5 py-8 text-center text-slate-400 dark:text-[#94A3B8] font-medium">
-                        No call logs recorded.
-                      </td>
-                    </tr>
-                  )}
-                </tbody>
-              </table>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
             )}
+          </div>
+        )}
+
+        {/* ── CALL DETAILS INSPECTION MODAL ── */}
+        {selectedCallModal && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs">
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.95 }}
+              className="bg-white dark:bg-[#1E293B] rounded-2xl shadow-2xl border border-slate-200/90 dark:border-white/10 max-w-lg w-full p-6 space-y-4"
+            >
+              {/* Modal Header */}
+              <div className="flex items-center justify-between border-b border-slate-100 dark:border-white/10 pb-3">
+                <div className="flex items-center gap-2.5">
+                  <div className="h-9 w-9 rounded-xl bg-blue-50 dark:bg-blue-500/15 text-blue-600 dark:text-blue-400 flex items-center justify-center font-bold">
+                    <PhoneCall className="h-4.5 w-4.5" />
+                  </div>
+                  <div>
+                    <h3 className="text-base font-extrabold text-slate-900 dark:text-white">
+                      Call #{selectedCallModal.id.slice(-6).toUpperCase()} Details
+                    </h3>
+                    <p className="text-xs text-slate-500 dark:text-slate-400 font-mono">
+                      ID: {selectedCallModal.id}
+                    </p>
+                  </div>
+                </div>
+                <button
+                  onClick={() => setSelectedCallModal(null)}
+                  className="text-slate-400 hover:text-slate-600 dark:hover:text-white p-1 rounded-lg hover:bg-slate-100 dark:hover:bg-white/10 transition cursor-pointer"
+                >
+                  <X className="h-5 w-5" />
+                </button>
+              </div>
+
+              {/* Modal Details Grid */}
+              <div className="grid grid-cols-2 gap-3 text-xs">
+                <div className="p-2.5 rounded-xl bg-slate-50 dark:bg-[#131C2F] border border-slate-200/80 dark:border-white/10">
+                  <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">Direction</span>
+                  <span className="font-bold text-slate-800 dark:text-white uppercase mt-0.5 block">
+                    {selectedCallModal.direction || "OUTBOUND"}
+                  </span>
+                </div>
+                <div className="p-2.5 rounded-xl bg-slate-50 dark:bg-[#131C2F] border border-slate-200/80 dark:border-white/10">
+                  <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">Duration</span>
+                  <span className="font-bold font-mono text-slate-800 dark:text-white mt-0.5 block">
+                    {formatDurationHMS(selectedCallModal.duration_seconds)} ({selectedCallModal.duration_seconds || 0}s)
+                  </span>
+                </div>
+                <div className="p-2.5 rounded-xl bg-slate-50 dark:bg-[#131C2F] border border-slate-200/80 dark:border-white/10">
+                  <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">Outcome</span>
+                  <span className="font-bold text-slate-800 dark:text-white uppercase mt-0.5 block">
+                    {selectedCallModal.outcome || "COMPLETED"}
+                  </span>
+                </div>
+                <div className="p-2.5 rounded-xl bg-slate-50 dark:bg-[#131C2F] border border-slate-200/80 dark:border-white/10">
+                  <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">Lead ID</span>
+                  <span className="font-mono text-slate-800 dark:text-white mt-0.5 block truncate" title={selectedCallModal.lead_id}>
+                    {selectedCallModal.lead_id || "Direct / Inbound"}
+                  </span>
+                </div>
+                <div className="col-span-2 p-2.5 rounded-xl bg-slate-50 dark:bg-[#131C2F] border border-slate-200/80 dark:border-white/10">
+                  <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">Started Timestamp (IST)</span>
+                  <span className="font-mono text-slate-800 dark:text-white mt-0.5 block">
+                    {formatCallTimestamp(selectedCallModal.started_at)}
+                  </span>
+                </div>
+                <div className="col-span-2 p-2.5 rounded-xl bg-slate-50 dark:bg-[#131C2F] border border-slate-200/80 dark:border-white/10 space-y-1">
+                  <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">Notes &amp; Disposition</span>
+                  <p className="text-slate-700 dark:text-slate-200 text-xs leading-relaxed whitespace-pre-wrap">
+                    {selectedCallModal.notes || "No call notes recorded for this session."}
+                  </p>
+                </div>
+              </div>
+
+              {/* Modal Footer */}
+              <div className="pt-3 border-t border-slate-100 dark:border-white/10 flex justify-end">
+                <button
+                  onClick={() => setSelectedCallModal(null)}
+                  className="px-5 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 dark:bg-white dark:hover:bg-slate-100 text-white dark:text-slate-900 font-bold text-xs transition cursor-pointer"
+                >
+                  Close Details
+                </button>
+              </div>
+            </motion.div>
           </div>
         )}
       </div>

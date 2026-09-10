@@ -15,6 +15,7 @@ import PauseBreakModal from "../components/PauseBreakModal";
 import ShiftSummaryModal from "../components/ShiftSummaryModal";
 import EarlyLogoutWarningModal from "../components/EarlyLogoutWarningModal";
 import { WrapUpPanel } from "../components/WrapUpPanel";
+import { isFutureISTDateTime, getCurrentISTInputs } from "../utils/dateUtils";
 import {
   Phone,
   PhoneCall,
@@ -1735,9 +1736,15 @@ export default function Dialer() {
       return;
     }
 
-    if (disposition === "call_back" && (!followUpDate || !followUpTime)) {
-      showToast("Please provide both follow-up date and time for Call Back", "warning");
-      return;
+    if (disposition === "call_back") {
+      if (!followUpDate || !followUpTime) {
+        showToast("Please provide both follow-up date and time for Call Back", "warning");
+        return;
+      }
+      if (!isFutureISTDateTime(followUpDate, followUpTime)) {
+        showToast("Follow-up date & time must be in the future (Asia/Kolkata timezone)", "error");
+        return;
+      }
     }
 
     setIsSavingOutcome(true);
@@ -1755,22 +1762,22 @@ export default function Dialer() {
         });
       } else if (disposition === "call_back" || followUpDate) {
         // Fallback: If no server-side active callId exists, register the follow-up directly
-        try {
-          await api.post("/api/follow-ups", {
-            customer_id: selectedLead?._id,
-            lead_id: selectedLead?._id,
-            customer_name: selectedLead?.name || "Customer",
-            customer_phone: outboundPhone || selectedLead?.phone || "",
-            agent_id: user?.id,
-            pool_id: selectedLead?.pool_id,
-            follow_up_datetime: combinedFollowUp,
-            reason: notes || "Call Back Scheduled from Dialer",
-            notes
-          });
-        } catch (fue) {
-          console.warn("[Dialer] Follow-up direct creation fallback:", fue);
-        }
+        await api.post("/api/follow-ups", {
+          customer_id: selectedLead?._id,
+          lead_id: selectedLead?._id,
+          customer_name: selectedLead?.name || "Customer",
+          customer_phone: outboundPhone || selectedLead?.phone || "",
+          agent_id: user?.id,
+          pool_id: selectedLead?.pool_id,
+          follow_up_datetime: combinedFollowUp,
+          follow_up_date: followUpDate,
+          follow_up_time: followUpTime,
+          time_zone: "Asia/Kolkata",
+          reason: notes || "Call Back Scheduled from Dialer",
+          notes
+        });
       }
+
 
       // Step 2: Update lead status in real time if selected
       if (selectedLead?._id) {

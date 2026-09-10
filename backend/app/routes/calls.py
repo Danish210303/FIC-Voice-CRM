@@ -2197,44 +2197,76 @@ async def record_call_disposition(call_id: str, payload: CallDispositionPayload,
             ]
 
             fu_status = "due" if fu_dt <= utcnow() else "scheduled"
-            fu_doc = {
-                "customer_id": str(call.get("lead_id") or call.get("phone") or utcnow().timestamp()),
-                "lead_id": str(call.get("lead_id")) if call.get("lead_id") else None,
-                "customer_name": cust_name,
-                "customer_phone": cust_phone,
-                "phone_number": cust_phone,
-                "original_agent_id": agent_id,
-                "original_agent_name": agent_name,
-                "current_agent_id": agent_id,
-                "current_agent_name": agent_name,
-                "assigned_agent_id": agent_id,
-                "assigned_agent_name": agent_name,
-                "agent_id": agent_id,
-                "agent_name": agent_name,
-                "agent_employee_id": agent_emp_id,
-                "pool_id": pool_id,
-                "pool_name": pool_name,
-                "scheduled_at": fu_dt,
-                "follow_up_datetime": fu_dt,
-                "reason": payload.notes or f"Follow-up after call ({payload.disposition.replace('_', ' ').title()})",
-                "notes": payload.notes or "",
-                "status": fu_status,
-                "priority": "medium",
-                "time_zone": "Asia/Kolkata",
-                "original_call_id": str(call_id),
-                "related_call_id": str(call_id),
-                "timeline": initial_timeline,
-                "attempts": [],
-                "call_attempts_count": 0,
-                "is_locked": False,
-                "lock_timestamp": None,
-                "created_by": agent_id,
-                "created_at": utcnow(),
-                "updated_at": utcnow()
-            }
-            ins_fu = await follow_ups_col.insert_one(fu_doc)
-            fu_doc["_id"] = ins_fu.inserted_id
-            fu_id_str = str(ins_fu.inserted_id)
+
+            # Check if a follow-up already exists for this call to prevent duplicates
+            existing_fu = await follow_ups_col.find_one({
+                "$or": [
+                    {"original_call_id": str(call_id)},
+                    {"related_call_id": str(call_id)}
+                ]
+            })
+
+            if existing_fu:
+                fu_id_str = str(existing_fu["_id"])
+                update_fu_payload = {
+                    "customer_name": cust_name,
+                    "customer_phone": cust_phone,
+                    "scheduled_at": fu_dt,
+                    "follow_up_datetime": fu_dt,
+                    "reason": payload.notes or f"Follow-up after call ({payload.disposition.replace('_', ' ').title()})",
+                    "notes": payload.notes or "",
+                    "status": fu_status,
+                    "priority": "medium",
+                    "time_zone": "Asia/Kolkata",
+                    "updated_at": utcnow()
+                }
+                await follow_ups_col.update_one(
+                    {"_id": existing_fu["_id"]},
+                    {
+                        "$set": update_fu_payload,
+                        "$push": {"timeline": {"$each": initial_timeline, "$position": 0}}
+                    }
+                )
+                fu_doc = {**existing_fu, **update_fu_payload, "_id": existing_fu["_id"]}
+            else:
+                fu_doc = {
+                    "customer_id": str(call.get("lead_id") or call.get("phone") or utcnow().timestamp()),
+                    "lead_id": str(call.get("lead_id")) if call.get("lead_id") else None,
+                    "customer_name": cust_name,
+                    "customer_phone": cust_phone,
+                    "phone_number": cust_phone,
+                    "original_agent_id": agent_id,
+                    "original_agent_name": agent_name,
+                    "current_agent_id": agent_id,
+                    "current_agent_name": agent_name,
+                    "assigned_agent_id": agent_id,
+                    "assigned_agent_name": agent_name,
+                    "agent_id": agent_id,
+                    "agent_name": agent_name,
+                    "agent_employee_id": agent_emp_id,
+                    "pool_id": pool_id,
+                    "pool_name": pool_name,
+                    "scheduled_at": fu_dt,
+                    "follow_up_datetime": fu_dt,
+                    "reason": payload.notes or f"Follow-up after call ({payload.disposition.replace('_', ' ').title()})",
+                    "notes": payload.notes or "",
+                    "status": fu_status,
+                    "priority": "medium",
+                    "time_zone": "Asia/Kolkata",
+                    "original_call_id": str(call_id),
+                    "related_call_id": str(call_id),
+                    "timeline": initial_timeline,
+                    "attempts": [],
+                    "call_attempts_count": 0,
+                    "is_locked": False,
+                    "lock_timestamp": None,
+                    "created_by": agent_id,
+                    "created_at": utcnow(),
+                    "updated_at": utcnow()
+                }
+                ins_fu = await follow_ups_col.insert_one(fu_doc)
+                fu_doc["_id"] = ins_fu.inserted_id
+                fu_id_str = str(ins_fu.inserted_id)
             
             await ws_manager.broadcast_global({
                 "event": "FOLLOW_UP_CREATED",
@@ -2242,8 +2274,8 @@ async def record_call_disposition(call_id: str, payload: CallDispositionPayload,
                 "follow_up": {
                     "id": fu_id_str,
                     "_id": fu_id_str,
-                    "customer_id": fu_doc["customer_id"],
-                    "lead_id": fu_doc["lead_id"],
+                    "customer_id": str(call.get("lead_id") or cust_phone),
+                    "lead_id": str(call.get("lead_id")) if call.get("lead_id") else None,
                     "customer_name": cust_name,
                     "customer_phone": cust_phone,
                     "agent_id": agent_id,
@@ -2269,7 +2301,7 @@ async def record_call_disposition(call_id: str, payload: CallDispositionPayload,
                 "scheduled_datetime": fu_dt.isoformat(),
                 "timestamp": utcnow().isoformat()
             })
-            logger.info(f"[DISPOSITION] Created Follow-Up #{ins_fu.inserted_id} for {cust_name} ({cust_phone}) at {fu_dt.isoformat()}")
+            logger.info(f"[DISPOSITION] Recorded Follow-Up #{fu_id_str} for {cust_name} ({cust_phone}) at {fu_dt.isoformat()}")
         except Exception as fue:
             logger.warning(f"[DISPOSITION FOLLOW-UP CREATE WARNING] {fue}")
 

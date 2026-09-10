@@ -322,48 +322,99 @@ async def create_or_update_lead_follow_up(
         }
     }
 
-    doc = {
-        "customer_id": actual_lead_id or cust_phone or str(now.timestamp()),
-        "lead_id": actual_lead_id,
-        "customer_name": cust_name,
-        "customer_phone": cust_phone,
-        "phone_number": cust_phone,
-        "user_id": str(current_user_id or target_agent_id or ""),
-        # Original Agent Assignment
-        "original_agent_id": target_agent_id or "",
-        "original_agent_name": agent_name,
-        # Assigned / Current Agent Assignment
-        "assigned_agent_id": target_agent_id or "",
-        "assigned_agent_name": agent_name,
-        "current_agent_id": target_agent_id or "",
-        "current_agent_name": agent_name,
-        "agent_id": target_agent_id or "",
-        "agent_name": agent_name,
-        "agent_employee_id": agent_emp_id,
-        "pool_id": pool_id,
-        "pool_name": pool_name,
-        "scheduled_at": fu_dt,
-        "follow_up_datetime": fu_dt,
-        "reason": reason or (notes or "Follow-Up Call"),
-        "notes": notes or "",
-        "status": status_val,
-        "priority": priority or "medium",
-        "time_zone": "Asia/Kolkata",
-        "original_call_id": str(related_call_id) if related_call_id else None,
-        "related_call_id": str(related_call_id) if related_call_id else None,
-        "timeline": [initial_timeline_event],
-        "attempts": [],
-        "call_attempts_count": 0,
-        "is_locked": False,
-        "lock_timestamp": None,
-        "created_by": str(current_user_id or target_agent_id or "system"),
-        "created_at": now,
-        "updated_at": now
-    }
+    # Deduplication: Check if an active/matching follow-up already exists
+    existing_fu = None
+    if related_call_id:
+        existing_fu = await follow_ups_col.find_one({
+            "$or": [
+                {"original_call_id": str(related_call_id)},
+                {"related_call_id": str(related_call_id)}
+            ]
+        })
+    if not existing_fu and actual_lead_id:
+        existing_fu = await follow_ups_col.find_one({
+            "lead_id": str(actual_lead_id),
+            "status": {"$in": ["scheduled", "due", "waiting_for_agent"]}
+        })
+    if not existing_fu and cust_phone:
+        existing_fu = await follow_ups_col.find_one({
+            "customer_phone": cust_phone,
+            "status": {"$in": ["scheduled", "due", "waiting_for_agent"]}
+        })
 
-    res = await follow_ups_col.insert_one(doc)
-    doc["_id"] = res.inserted_id
-    fu_id = str(res.inserted_id)
+    if existing_fu:
+        fu_id = str(existing_fu["_id"])
+        update_payload = {
+            "customer_name": cust_name,
+            "customer_phone": cust_phone,
+            "scheduled_at": fu_dt,
+            "follow_up_datetime": fu_dt,
+            "reason": reason or (notes or existing_fu.get("reason", "Follow-Up Call")),
+            "notes": notes or existing_fu.get("notes", ""),
+            "status": status_val,
+            "priority": priority or existing_fu.get("priority", "medium"),
+            "current_agent_id": target_agent_id or existing_fu.get("current_agent_id", ""),
+            "current_agent_name": agent_name or existing_fu.get("current_agent_name", "Agent"),
+            "agent_id": target_agent_id or existing_fu.get("agent_id", ""),
+            "agent_name": agent_name or existing_fu.get("agent_name", "Agent"),
+            "pool_id": pool_id or existing_fu.get("pool_id", "general"),
+            "pool_name": pool_name or existing_fu.get("pool_name", "Customer Support"),
+            "time_zone": "Asia/Kolkata",
+            "updated_at": now
+        }
+        if related_call_id:
+            update_payload["related_call_id"] = str(related_call_id)
+
+        await follow_ups_col.update_one(
+            {"_id": existing_fu["_id"]},
+            {
+                "$set": update_payload,
+                "$push": {"timeline": {"$each": [initial_timeline_event], "$position": 0}}
+            }
+        )
+        doc = {**existing_fu, **update_payload, "_id": existing_fu["_id"]}
+    else:
+        doc = {
+            "customer_id": actual_lead_id or cust_phone or str(now.timestamp()),
+            "lead_id": actual_lead_id,
+            "customer_name": cust_name,
+            "customer_phone": cust_phone,
+            "phone_number": cust_phone,
+            "user_id": str(current_user_id or target_agent_id or ""),
+            # Original Agent Assignment
+            "original_agent_id": target_agent_id or "",
+            "original_agent_name": agent_name,
+            # Assigned / Current Agent Assignment
+            "assigned_agent_id": target_agent_id or "",
+            "assigned_agent_name": agent_name,
+            "current_agent_id": target_agent_id or "",
+            "current_agent_name": agent_name,
+            "agent_id": target_agent_id or "",
+            "agent_name": agent_name,
+            "agent_employee_id": agent_emp_id,
+            "pool_id": pool_id,
+            "pool_name": pool_name,
+            "scheduled_at": fu_dt,
+            "follow_up_datetime": fu_dt,
+            "reason": reason or (notes or "Follow-Up Call"),
+            "notes": notes or "",
+            "status": status_val,
+            "priority": priority or "medium",
+            "time_zone": "Asia/Kolkata",
+            "original_call_id": str(related_call_id) if related_call_id else None,
+            "related_call_id": str(related_call_id) if related_call_id else None,
+            "timeline": [initial_timeline_event],
+            "attempts": [],
+            "call_attempts_count": 0,
+            "is_locked": False,
+            "lock_timestamp": None,
+            "created_by": str(current_user_id or target_agent_id or "system"),
+            "created_at": now,
+            "updated_at": now
+        }
+        res = await follow_ups_col.insert_one(doc)
+        doc["_id"] = res.inserted_id
+        fu_id = str(res.inserted_id)
 
     if actual_lead_id and ObjectId.is_valid(actual_lead_id):
         try:
