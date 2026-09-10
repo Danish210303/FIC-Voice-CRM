@@ -296,9 +296,8 @@ async def list_follow_ups(
     # Status tab filtering
     if status_filter:
         s_clean = status_filter.lower().strip()
-        if s_clean == "upcoming":
+        if s_clean in ["upcoming", "scheduled"]:
             query["status"] = "scheduled"
-            query["follow_up_datetime"] = {"$gt": now}
         elif s_clean in ["due", "due_now"]:
             query["status"] = {"$in": ["due", "waiting_for_agent", "auto_calling"]}
         elif s_clean == "waiting":
@@ -316,7 +315,9 @@ async def list_follow_ups(
             {"agent_id": agent_id},
             {"current_agent_id": agent_id},
             {"assigned_agent_id": agent_id},
-            {"original_agent_id": agent_id}
+            {"original_agent_id": agent_id},
+            {"created_by": agent_id},
+            {"user_id": agent_id}
         ]
     elif user_role in ("agent", "agent_user") and not pool_id and not search:
         # Default agent to their own follow-ups if no specific search
@@ -324,7 +325,9 @@ async def list_follow_ups(
             {"agent_id": user_id},
             {"current_agent_id": user_id},
             {"assigned_agent_id": user_id},
-            {"original_agent_id": user_id}
+            {"original_agent_id": user_id},
+            {"created_by": user_id},
+            {"user_id": user_id}
         ]
 
     if pool_id and pool_id != "all":
@@ -378,17 +381,16 @@ async def get_follow_up_stats(
 
     base_query: Dict[str, Any] = {}
     if agent_id:
-        base_query["$or"] = [{"agent_id": agent_id}, {"current_agent_id": agent_id}, {"assigned_agent_id": agent_id}]
+        base_query["$or"] = [{"agent_id": agent_id}, {"current_agent_id": agent_id}, {"assigned_agent_id": agent_id}, {"created_by": agent_id}]
     elif user_role in ("agent", "agent_user"):
-        base_query["$or"] = [{"agent_id": user_id}, {"current_agent_id": user_id}, {"assigned_agent_id": user_id}]
+        base_query["$or"] = [{"agent_id": user_id}, {"current_agent_id": user_id}, {"assigned_agent_id": user_id}, {"created_by": user_id}]
 
     if pool_id and pool_id != "all":
         base_query["pool_id"] = pool_id
 
     upcoming_count = await follow_ups_col.count_documents({
         **base_query,
-        "status": "scheduled",
-        "follow_up_datetime": {"$gt": now}
+        "status": "scheduled"
     })
     due_count = await follow_ups_col.count_documents({
         **base_query,
@@ -402,7 +404,6 @@ async def get_follow_up_stats(
         **base_query,
         "status": "missed"
     })
-
     total_kpi = upcoming_count + due_count + completed_count + missed_count
 
     return {
@@ -413,7 +414,7 @@ async def get_follow_up_stats(
             "due": due_count,
             "due_now": due_count,
             "completed": completed_count,
-            "missed": missed_count
+            "missed": missed_count,
         },
         "total": total_kpi,
         "upcoming": upcoming_count,

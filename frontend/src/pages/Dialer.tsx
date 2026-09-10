@@ -15,6 +15,7 @@ import PauseBreakModal from "../components/PauseBreakModal";
 import ShiftSummaryModal from "../components/ShiftSummaryModal";
 import EarlyLogoutWarningModal from "../components/EarlyLogoutWarningModal";
 import { WrapUpPanel } from "../components/WrapUpPanel";
+import { useFollowUps } from "../context/FollowUpContext";
 import { isFutureISTDateTime, getCurrentISTInputs } from "../utils/dateUtils";
 import {
   Phone,
@@ -155,6 +156,7 @@ type CallHistoryItem = {
 export default function Dialer() {
   const { user } = useAuth();
   const { showToast } = useToast();
+  const { fetchFollowUps, fetchStats: fetchFollowUpStats } = useFollowUps();
   const {
     myStatus,
     pauseReason,
@@ -1169,7 +1171,9 @@ export default function Dialer() {
             customer_phone: selectedLead.phone || outboundPhone,
             agent_id: user?.id,
             pool_id: selectedLead.pool_id,
+            call_id: currentCallId || undefined,
             follow_up_datetime: followUpDate,
+            time_zone: "Asia/Kolkata",
             reason: notes || `Follow-up (${status.replace(/_/g, " ").toUpperCase()})`,
             notes
           });
@@ -1200,6 +1204,8 @@ export default function Dialer() {
       showToast(`Disposition saved: ${status.replace(/_/g, " ").toUpperCase()}`, "success");
       fetchLeads();
       fetchCallHistory();
+      fetchFollowUps("all");
+      fetchFollowUpStats();
     } catch (err: any) {
       showToast(err.message || "Failed to save disposition", "error");
     } finally {
@@ -1760,22 +1766,29 @@ export default function Dialer() {
           follow_up_date: followUpDate,
           follow_up_time: followUpTime
         });
-      } else if (disposition === "call_back" || followUpDate) {
-        // Fallback: If no server-side active callId exists, register the follow-up directly
-        await api.post("/api/follow-ups", {
-          customer_id: selectedLead?._id,
-          lead_id: selectedLead?._id,
-          customer_name: selectedLead?.name || "Customer",
-          customer_phone: outboundPhone || selectedLead?.phone || "",
-          agent_id: user?.id,
-          pool_id: selectedLead?.pool_id,
-          follow_up_datetime: combinedFollowUp,
-          follow_up_date: followUpDate,
-          follow_up_time: followUpTime,
-          time_zone: "Asia/Kolkata",
-          reason: notes || "Call Back Scheduled from Dialer",
-          notes
-        });
+      }
+
+      // Step 2: Ensure persistent follow-up is saved and indexed in follow_ups collection
+      if (disposition === "call_back" || followUpDate) {
+        try {
+          await api.post("/api/follow-ups", {
+            customer_id: selectedLead?._id,
+            lead_id: selectedLead?._id,
+            customer_name: selectedLead?.name || "Customer",
+            customer_phone: outboundPhone || selectedLead?.phone || "",
+            agent_id: user?.id,
+            pool_id: selectedLead?.pool_id,
+            call_id: currentCallId || undefined,
+            follow_up_datetime: combinedFollowUp,
+            follow_up_date: followUpDate,
+            follow_up_time: followUpTime,
+            time_zone: "Asia/Kolkata",
+            reason: notes || "Call Back Scheduled from Dialer",
+            notes
+          });
+        } catch (fErr) {
+          console.warn("[Dialer] Follow-up direct persistence notice:", fErr);
+        }
       }
 
 
@@ -1843,6 +1856,8 @@ export default function Dialer() {
 
       fetchLeads();
       fetchCallHistory();
+      fetchFollowUps("all");
+      fetchFollowUpStats();
     } catch (err: any) {
       showToast(err.message || "Failed to save call disposition", "error");
     } finally {
