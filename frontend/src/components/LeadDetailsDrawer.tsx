@@ -101,9 +101,16 @@ const TEMPLATES = [
 ];
 
 const DISPOSITION_STATUS_OPTIONS = [
-  { value: "new", label: "New Lead" }, { value: "in_progress", label: "In Progress" },
-  { value: "follow_up", label: "Follow-up Needed" }, { value: "qualified", label: "Qualified" },
-  { value: "not_interested", label: "Not Interested" }, { value: "closed", label: "Closed / Won" }
+  { value: "new", label: "New Lead" },
+  { value: "in_progress", label: "In Progress" },
+  { value: "follow_up", label: "Follow-up Needed" },
+  { value: "call_back", label: "Call Back" },
+  { value: "follow_up_required", label: "Follow-up Required" },
+  { value: "qualified", label: "Qualified" },
+  { value: "interested", label: "Interested" },
+  { value: "not_interested", label: "Not Interested" },
+  { value: "converted", label: "Converted / Won" },
+  { value: "closed", label: "Closed / Won" }
 ];
 
 const maskPhoneNumber = (phoneStr?: string): string => {
@@ -1166,53 +1173,40 @@ export default function LeadDetailsDrawer({ lead, onClose, onUpdateDisposition, 
                 transition={{ duration: 0.18 }}
                 className="space-y-4"
               >
-                {user?.role === "agent" && lead.status !== "new" ? (
-                  <div className="bg-rose-50 dark:bg-rose-950/20 border border-rose-200 dark:border-rose-800/40 rounded-xl p-4.5 flex items-start gap-3 shadow-2xs">
-                    <AlertCircle className="h-4.5 w-4.5 text-rose-500 shrink-0 mt-0.5" />
-                    <div>
-                      <p className="font-extrabold text-[11px] uppercase tracking-wider text-rose-800 dark:text-rose-400 mb-0.5">
-                        Read-Only Lead
-                      </p>
-                      <p className="text-xs font-medium text-rose-600 dark:text-rose-400/80 leading-relaxed">
-                        Agents are only permitted to update the disposition of leads that are in NEW status.
-                      </p>
+                <form onSubmit={handleSaveDisposition} className="bg-white dark:bg-[#131F35] rounded-xl p-4.5 border border-slate-200/90 dark:border-slate-800 shadow-2xs space-y-4">
+                  <div className="flex items-center gap-2 border-b border-slate-100 dark:border-slate-800 pb-3">
+                    <div className="h-7 w-7 rounded-lg bg-blue-50 dark:bg-blue-950/50 border border-blue-100 dark:border-blue-900/50 flex items-center justify-center">
+                      <Edit3 className="h-3.5 w-3.5 text-[#0F4FA8] dark:text-blue-400" />
                     </div>
+                    <span className="text-[11px] font-extrabold text-slate-800 dark:text-slate-200 uppercase tracking-wider">
+                      UPDATE DISPOSITION &amp; FOLLOW-UP
+                    </span>
                   </div>
-                ) : (
-                  <form onSubmit={handleSaveDisposition} className="bg-white dark:bg-[#131F35] rounded-xl p-4.5 border border-slate-200/90 dark:border-slate-800 shadow-2xs space-y-4">
-                    <div className="flex items-center gap-2 border-b border-slate-100 dark:border-slate-800 pb-3">
-                      <div className="h-7 w-7 rounded-lg bg-blue-50 dark:bg-blue-950/50 border border-blue-100 dark:border-blue-900/50 flex items-center justify-center">
-                        <Edit3 className="h-3.5 w-3.5 text-[#0F4FA8] dark:text-blue-400" />
-                      </div>
-                      <span className="text-[11px] font-extrabold text-slate-800 dark:text-slate-200 uppercase tracking-wider">
-                        UPDATE DISPOSITION &amp; FOLLOW-UP
-                      </span>
+
+                  <div className="space-y-3.5">
+                    <div>
+                      <label className="block text-[10px] font-extrabold uppercase tracking-wider text-slate-400 mb-1">
+                        Status Disposition
+                      </label>
+                      <CustomSelect
+                        value={status}
+                        onChange={setStatus}
+                        options={DISPOSITION_STATUS_OPTIONS}
+                        placeholder="Select Disposition"
+                        triggerClassName="h-9 rounded-xl text-xs border-slate-200 dark:border-slate-700 dark:bg-[#0D1526]"
+                      />
                     </div>
 
-                    <div className="space-y-3.5">
-                      <div>
-                        <label className="block text-[10px] font-extrabold uppercase tracking-wider text-slate-400 mb-1">
-                          Status Disposition
-                        </label>
-                        <CustomSelect
-                          value={status}
-                          onChange={setStatus}
-                          options={DISPOSITION_STATUS_OPTIONS}
-                          placeholder="Select Disposition"
-                          triggerClassName="h-9 rounded-xl text-xs border-slate-200 dark:border-slate-700 dark:bg-[#0D1526]"
+                    {(status === "follow_up" || status === "in_progress" || status === "call_back" || status === "follow_up_required") && (
+                      <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: "auto" }}>
+                        <CustomDateTimePicker
+                          label="Follow-up Date & Time"
+                          value={followUpDate}
+                          onChange={setFollowUpDate}
+                          placeholder="Select Follow-up Date & Time"
                         />
-                      </div>
-
-                      {(status === "follow_up" || status === "in_progress") && (
-                        <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: "auto" }}>
-                          <CustomDateTimePicker
-                            label="Follow-up Date & Time"
-                            value={followUpDate}
-                            onChange={setFollowUpDate}
-                            placeholder="Select Follow-up Date & Time"
-                          />
-                        </motion.div>
-                      )}
+                      </motion.div>
+                    )}
 
                       <div>
                         <div className="flex justify-between items-center mb-1">
@@ -1245,7 +1239,6 @@ export default function LeadDetailsDrawer({ lead, onClose, onUpdateDisposition, 
                       </div>
                     </div>
                   </form>
-                )}
               </motion.div>
             )}
 
@@ -1356,7 +1349,7 @@ export default function LeadDetailsDrawer({ lead, onClose, onUpdateDisposition, 
             <div className="flex items-center gap-2">
               <button
                 onClick={() => handleSaveDisposition()}
-                disabled={isSubmitting || (user?.role === "agent" && lead.status !== "new")}
+                disabled={isSubmitting}
                 title="Save Disposition"
                 className="h-[34px] px-4 flex items-center justify-center gap-1.5 rounded-lg text-[11.5px] font-extrabold bg-gradient-to-r from-[#0F4FA8] to-[#1D4ED8] hover:from-[#0B3C80] hover:to-[#1656B3] text-white shadow-sm transition-all cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed active:scale-95"
               >

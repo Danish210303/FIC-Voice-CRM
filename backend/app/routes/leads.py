@@ -534,10 +534,8 @@ async def bulk_status_leads(payload: LeadBulkStatus, user: dict = Depends(get_cu
     db_query = {"$or": or_conditions}
     if user.get("role") == Role.AGENT:
         uid = _uid(user)
-        owner_condition = {"$or": [{"assigned_agent_id": uid}, {"created_by": uid}]}
-        # Agent can only edit NEW leads
-        status_condition = {"status": "new"}
-        db_query = {"$and": [db_query, owner_condition, status_condition]}
+        owner_condition = {"$or": [{"assigned_agent_id": uid}, {"created_by": uid}, {"assigned_agent_id": None}, {"assigned_agent_id": ""}]}
+        db_query = {"$and": [db_query, owner_condition]}
 
     result = await leads_col.update_many(
         db_query,
