@@ -36,6 +36,8 @@ import {
   Radio,
   Layers,
   Zap,
+  FileText,
+  Tag,
 } from "lucide-react";
 
 export default function FollowUps() {
@@ -58,8 +60,23 @@ export default function FollowUps() {
   const [searchTerm, setSearchTerm] = useState("");
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
 
-  // Timeline Modal State
+  // Timeline Modal State & Category Filter
   const [timelineModalItem, setTimelineModalItem] = useState<FollowUpItem | null>(null);
+  const [timelineCategory, setTimelineCategory] = useState<"all" | "calls" | "assignments" | "status" | "followups">("all");
+
+  // Close modals on Escape key press
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        setTimelineModalItem(null);
+        setReassignModalItem(null);
+        setRescheduleModalItem(null);
+        setCompleteModalItem(null);
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, []);
 
   // Reassign Modal State
   const [reassignModalItem, setReassignModalItem] = useState<FollowUpItem | null>(null);
@@ -283,6 +300,120 @@ export default function FollowUps() {
       );
     });
   }, [followUps, activeTab, searchTerm]);
+
+  const getEventCategory = (entry: any): "calls" | "assignments" | "status" | "followups" => {
+    const act = (entry.action || entry.event || "").toLowerCase();
+    if (act.includes("call") || act.includes("dial") || act.includes("ring") || act.includes("connect") || act.includes("answer")) return "calls";
+    if (act.includes("assign") || act.includes("transfer") || act.includes("pool") || act.includes("agent")) return "assignments";
+    if (act.includes("due") || act.includes("miss") || act.includes("wait") || act.includes("schedul") || act.includes("status")) return "status";
+    return "followups";
+  };
+
+  const getTimelineEventVisuals = (actionName: string) => {
+    const act = actionName.toUpperCase();
+    if (act.includes("COMPLETED") || act.includes("CONNECTED") || act.includes("RESOLVED") || act.includes("WON")) {
+      return {
+        badgeBg: "bg-emerald-50 text-emerald-700 border-emerald-200",
+        nodeBg: "bg-emerald-500",
+        nodeRing: "ring-emerald-100",
+        icon: <CheckCircle2 className="h-3.5 w-3.5 text-white" />,
+      };
+    }
+    if (act.includes("CALL") || act.includes("INITIATED") || act.includes("RINGING") || act.includes("DIAL")) {
+      return {
+        badgeBg: "bg-cyan-50 text-cyan-700 border-cyan-200",
+        nodeBg: "bg-cyan-500",
+        nodeRing: "ring-cyan-100",
+        icon: <PhoneCall className="h-3.5 w-3.5 text-white" />,
+      };
+    }
+    if (act.includes("REASSIGN") || act.includes("ASSIGN") || act.includes("TRANSFER") || act.includes("POOL")) {
+      return {
+        badgeBg: "bg-purple-50 text-purple-700 border-purple-200",
+        nodeBg: "bg-purple-500",
+        nodeRing: "ring-purple-100",
+        icon: <Users className="h-3.5 w-3.5 text-white" />,
+      };
+    }
+    if (act.includes("RESCHEDULE") || act.includes("DUE") || act.includes("SCHEDULE")) {
+      return {
+        badgeBg: "bg-amber-50 text-amber-700 border-amber-200",
+        nodeBg: "bg-amber-500",
+        nodeRing: "ring-amber-100",
+        icon: <Clock className="h-3.5 w-3.5 text-white" />,
+      };
+    }
+    if (act.includes("FAIL") || act.includes("MISSED") || act.includes("CANCEL") || act.includes("UNAVAILABLE")) {
+      return {
+        badgeBg: "bg-rose-50 text-rose-700 border-rose-200",
+        nodeBg: "bg-rose-500",
+        nodeRing: "ring-rose-100",
+        icon: <AlertOctagon className="h-3.5 w-3.5 text-white" />,
+      };
+    }
+    if (act.includes("DISPOSITION") || act.includes("NOTE") || act.includes("OUTCOME")) {
+      return {
+        badgeBg: "bg-indigo-50 text-indigo-700 border-indigo-200",
+        nodeBg: "bg-indigo-500",
+        nodeRing: "ring-indigo-100",
+        icon: <FileText className="h-3.5 w-3.5 text-white" />,
+      };
+    }
+    return {
+      badgeBg: "bg-blue-50 text-blue-700 border-blue-200",
+      nodeBg: "bg-blue-500",
+      nodeRing: "ring-blue-100",
+      icon: <Activity className="h-3.5 w-3.5 text-white" />,
+    };
+  };
+
+  const groupedTimelineEvents = useMemo(() => {
+    if (!timelineModalItem?.timeline || timelineModalItem.timeline.length === 0) return [];
+
+    const rawList = [...timelineModalItem.timeline];
+    const filtered =
+      timelineCategory === "all"
+        ? rawList
+        : rawList.filter((entry) => getEventCategory(entry) === timelineCategory);
+
+    const grouped: Array<{
+      id: string;
+      action: string;
+      description: string;
+      actor: string;
+      actor_role?: string;
+      timestamp: string;
+      metadata?: Record<string, any>;
+      count: number;
+    }> = [];
+
+    filtered.forEach((entry: any, index: number) => {
+      const prev = grouped[grouped.length - 1];
+      const isConsecutiveDuplicate =
+        prev &&
+        prev.action === entry.action &&
+        prev.description === entry.description &&
+        prev.actor === entry.actor &&
+        (prev.metadata?.call_id || "") === (entry.metadata?.call_id || "");
+
+      if (isConsecutiveDuplicate) {
+        prev.count += 1;
+      } else {
+        grouped.push({
+          id: entry.id || `tl-${index}`,
+          action: entry.action || entry.event || "EVENT",
+          description: entry.description || "",
+          actor: entry.actor || "System Scheduler",
+          actor_role: entry.actor_role,
+          timestamp: entry.timestamp,
+          metadata: entry.metadata,
+          count: 1,
+        });
+      }
+    });
+
+    return grouped;
+  }, [timelineModalItem, timelineCategory]);
 
   return (
     <div className="space-y-6 max-w-7xl mx-auto w-full font-sans pb-16">
@@ -754,104 +885,218 @@ export default function FollowUps() {
         </div>
       </div>
 
-      {/* ── 5. INTERACTIVE TIMELINE AUDIT MODAL ── */}
+      {/* ── 5. ENTERPRISE BPO TIMELINE AUDIT MODAL ── */}
       {timelineModalItem && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs">
           <motion.div
-            initial={{ opacity: 0, scale: 0.95 }}
-            animate={{ opacity: 1, scale: 1 }}
-            className="bg-white rounded-2xl shadow-2xl border border-slate-200 max-w-2xl w-full p-6 space-y-5 max-h-[90vh] flex flex-col"
+            initial={{ opacity: 0, scale: 0.96, y: 8 }}
+            animate={{ opacity: 1, scale: 1, y: 0 }}
+            exit={{ opacity: 0, scale: 0.96, y: 8 }}
+            className="bg-white rounded-2xl shadow-2xl border border-slate-200/90 max-w-3xl w-full p-6 space-y-4 max-h-[92vh] flex flex-col overflow-hidden"
           >
-            {/* Modal Header */}
-            <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+            {/* 1. Modal Fixed Header */}
+            <div className="flex items-start justify-between border-b border-slate-100 pb-3.5 shrink-0">
               <div className="flex items-center gap-3">
-                <div className="h-10 w-10 rounded-xl bg-blue-50 text-blue-600 border border-blue-100 flex items-center justify-center shrink-0">
+                <div className="h-10 w-10 rounded-xl bg-blue-50 text-blue-600 border border-blue-100 flex items-center justify-center shrink-0 shadow-2xs">
                   <History className="h-5 w-5" />
                 </div>
                 <div>
-                  <h3 className="text-base font-extrabold text-slate-900">Follow-Up Audit & Reassignment Timeline</h3>
-                  <p className="text-xs text-slate-500 font-medium">
-                    Complete lifecycle audit trail • Customer: <strong className="text-slate-800">{timelineModalItem.customer_name}</strong>
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <h3 className="text-base font-extrabold text-slate-900 tracking-tight">
+                      Follow-Up Audit & Reassignment Timeline
+                    </h3>
+                    <span
+                      className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[10.5px] font-bold uppercase tracking-wider border ${
+                        getStatusBadge(timelineModalItem.status).bg
+                      }`}
+                    >
+                      <span className={`h-1.5 w-1.5 rounded-full ${getStatusBadge(timelineModalItem.status).dot}`} />
+                      {getStatusBadge(timelineModalItem.status).label}
+                    </span>
+                  </div>
+                  <p className="text-xs text-slate-500 font-medium mt-0.5">
+                    Real-time BPO lifecycle audit trail • Customer:{" "}
+                    <strong className="text-slate-800">{timelineModalItem.customer_name || "Customer"}</strong> • Phone:{" "}
+                    <span className="font-mono font-bold text-slate-700">
+                      +91 {(timelineModalItem.customer_phone || timelineModalItem.phone_number || "").slice(-10)}
+                    </span>
                   </p>
                 </div>
               </div>
               <button
                 onClick={() => setTimelineModalItem(null)}
-                className="text-slate-400 hover:text-slate-600 p-1.5 rounded-lg hover:bg-slate-100"
+                className="text-slate-400 hover:text-slate-700 p-1.5 rounded-xl hover:bg-slate-100 transition cursor-pointer"
+                title="Close (Esc)"
               >
                 <X className="h-5 w-5" />
               </button>
             </div>
 
-            {/* Summary Banner */}
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 p-3 rounded-xl bg-slate-50 border border-slate-200/80 text-xs">
+            {/* 2. Customer Summary Card */}
+            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2.5 p-3.5 rounded-xl bg-slate-50/90 border border-slate-200/90 text-xs shrink-0">
               <div>
                 <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">Customer Phone</span>
-                <span className="font-mono font-bold text-slate-800">
+                <span className="font-mono font-bold text-slate-900 mt-0.5 block truncate">
                   +91 {(timelineModalItem.customer_phone || timelineModalItem.phone_number || "").slice(-10)}
                 </span>
               </div>
               <div>
                 <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">Original Agent</span>
-                <span className="font-bold text-slate-800">
-                  {timelineModalItem.original_agent_name || timelineModalItem.agent_name || "N/A"}
+                <span className="font-bold text-slate-800 mt-0.5 block truncate" title={timelineModalItem.original_agent_name}>
+                  {timelineModalItem.original_agent_name || timelineModalItem.agent_name || "Sales Agent"}
                 </span>
               </div>
               <div>
                 <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">Current Agent</span>
-                <span className="font-bold text-blue-700">
-                  {timelineModalItem.current_agent_name || timelineModalItem.agent_name || "N/A"}
+                <span className="font-bold text-blue-700 mt-0.5 block truncate" title={timelineModalItem.current_agent_name}>
+                  {timelineModalItem.current_agent_name || timelineModalItem.agent_name || "Sales Agent"}
                 </span>
               </div>
               <div>
                 <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">Scheduled (IST)</span>
-                <span className="font-mono font-bold text-slate-800">
+                <span className="font-mono font-medium text-slate-800 mt-0.5 block text-[11px] truncate">
                   {formatDisplayDateTime(timelineModalItem.scheduled_at || timelineModalItem.follow_up_datetime)}
+                </span>
+              </div>
+              <div>
+                <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">Status</span>
+                <div className="mt-0.5">
+                  <span
+                    className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider border ${
+                      getStatusBadge(timelineModalItem.status).bg
+                    }`}
+                  >
+                    <span className={`h-1.5 w-1.5 rounded-full ${getStatusBadge(timelineModalItem.status).dot}`} />
+                    {getStatusBadge(timelineModalItem.status).label}
+                  </span>
+                </div>
+              </div>
+              <div>
+                <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">Outcome</span>
+                <span className="font-bold text-slate-800 uppercase tracking-wide mt-0.5 block truncate text-[11px]">
+                  {timelineModalItem.completion_outcome ||
+                    timelineModalItem.disposition ||
+                    (timelineModalItem.status === "completed" ? "COMPLETED" : "PENDING")}
                 </span>
               </div>
             </div>
 
-            {/* Scrollable Timeline List */}
-            <div className="flex-1 overflow-y-auto pr-1 space-y-4">
-              {timelineModalItem.timeline && timelineModalItem.timeline.length > 0 ? (
-                <div className="relative pl-6 border-l-2 border-slate-200 space-y-6">
-                  {timelineModalItem.timeline.map((entry: any, index: number) => {
-                    const actionName = (entry.action || entry.event || "").toUpperCase();
-                    let iconColor = "bg-blue-500";
-                    if (actionName.includes("CONNECTED") || actionName.includes("COMPLETED")) iconColor = "bg-emerald-500";
-                    if (actionName.includes("REASSIGN")) iconColor = "bg-purple-500";
-                    if (actionName.includes("CALLING") || actionName.includes("INITIATED")) iconColor = "bg-cyan-500";
-                    if (actionName.includes("FAILED") || actionName.includes("MISSED") || actionName.includes("UNAVAILABLE"))
-                      iconColor = "bg-rose-500";
+            {/* 3. Category Filter Bar */}
+            <div className="flex items-center justify-between gap-2 flex-wrap border-b border-slate-100 pb-2.5 shrink-0">
+              <div className="flex items-center gap-1 bg-slate-100/90 p-1 rounded-lg overflow-x-auto">
+                {(
+                  [
+                    { id: "all", label: "All Events" },
+                    { id: "calls", label: "Calls" },
+                    { id: "assignments", label: "Assignments" },
+                    { id: "status", label: "Status Changes" },
+                    { id: "followups", label: "Follow-Ups" },
+                  ] as const
+                ).map((f) => {
+                  const count =
+                    f.id === "all"
+                      ? timelineModalItem.timeline?.length || 0
+                      : (timelineModalItem.timeline || []).filter((e: any) => getEventCategory(e) === f.id).length;
+                  return (
+                    <button
+                      key={f.id}
+                      onClick={() => setTimelineCategory(f.id)}
+                      className={`px-2.5 py-1 rounded-md text-[11px] font-bold transition flex items-center gap-1.5 cursor-pointer whitespace-nowrap ${
+                        timelineCategory === f.id
+                          ? "bg-white text-slate-900 shadow-2xs"
+                          : "text-slate-500 hover:text-slate-800 hover:bg-slate-200/50"
+                      }`}
+                    >
+                      <span>{f.label}</span>
+                      <span className="px-1.5 py-0.2 rounded-full text-[9.5px] font-mono bg-slate-200/80 text-slate-600">
+                        {count}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+
+              <div className="text-[11px] text-slate-400 font-medium flex items-center gap-1.5">
+                <span className="h-2 w-2 rounded-full bg-emerald-500" />
+                <span>Single Source of Truth</span>
+              </div>
+            </div>
+
+            {/* 4. Scrollable Timeline Stream */}
+            <div className="flex-1 overflow-y-auto pr-1.5 space-y-4 max-h-[450px]">
+              {groupedTimelineEvents.length > 0 ? (
+                <div className="relative pl-7 border-l-2 border-slate-200 ml-3 space-y-5 my-2">
+                  {groupedTimelineEvents.map((entry, index) => {
+                    const visuals = getTimelineEventVisuals(entry.action);
+                    const callId = entry.metadata?.call_id;
 
                     return (
                       <div key={entry.id || index} className="relative group">
-                        {/* Timeline Node Icon */}
+                        {/* Timeline Node with event icon */}
                         <div
-                          className={`absolute -left-[31px] top-0.5 h-4 w-4 rounded-full border-2 border-white ${iconColor} shadow-xs`}
-                        />
+                          className={`absolute -left-[37px] top-1 h-6 w-6 rounded-full border-2 border-white ${visuals.nodeBg} flex items-center justify-center shadow-xs ring-4 ${visuals.nodeRing}`}
+                        >
+                          {visuals.icon}
+                        </div>
 
                         {/* Timeline Card */}
-                        <div className="bg-slate-50/80 hover:bg-slate-100/80 transition rounded-xl p-3.5 border border-slate-200/80 space-y-1.5">
-                          <div className="flex items-center justify-between flex-wrap gap-1">
-                            <span className="text-xs font-black uppercase tracking-wider text-slate-800">
-                              {entry.action?.replace(/_/g, " ") || "EVENT"}
-                            </span>
-                            <span className="text-[11px] font-mono font-medium text-slate-500">
+                        <div className="bg-slate-50/80 hover:bg-slate-100/90 transition-colors rounded-xl p-3.5 border border-slate-200/80 space-y-2">
+                          <div className="flex items-center justify-between flex-wrap gap-2">
+                            <div className="flex items-center gap-2">
+                              <span
+                                className={`inline-flex items-center px-2 py-0.5 rounded-md text-[10.5px] font-black uppercase tracking-wider border ${visuals.badgeBg}`}
+                              >
+                                {entry.action?.replace(/_/g, " ") || "EVENT"}
+                              </span>
+
+                              {entry.count > 1 && (
+                                <span
+                                  className="inline-flex items-center px-1.5 py-0.2 rounded-full text-[10px] font-bold bg-amber-100 text-amber-800 border border-amber-300 shadow-2xs cursor-default"
+                                  title={`Grouped ${entry.count} consecutive duplicate events`}
+                                >
+                                  ×{entry.count}
+                                </span>
+                              )}
+                            </div>
+
+                            <span className="text-[11.5px] font-mono font-medium text-slate-500">
                               {formatDisplayDateTime(entry.timestamp)}
                             </span>
                           </div>
 
-                          <p className="text-xs text-slate-700 font-medium">{entry.description}</p>
+                          <p className="text-[12.5px] text-slate-800 font-medium leading-relaxed">
+                            {entry.description}
+                          </p>
 
-                          <div className="flex items-center gap-3 pt-1 text-[11px] text-slate-500 font-medium">
-                            <span className="flex items-center gap-1">
-                              <User className="h-3 w-3 text-slate-400" />
-                              <span>Actor: <strong className="text-slate-700">{entry.actor || "System Scheduler"}</strong></span>
+                          {/* Footer metadata bar */}
+                          <div className="flex items-center gap-3 pt-1.5 border-t border-slate-200/60 text-[11.5px] text-slate-500 font-medium flex-wrap">
+                            <span className="flex items-center gap-1.5">
+                              <User className="h-3.5 w-3.5 text-slate-400" />
+                              <span>
+                                Actor: <strong className="text-slate-800">{entry.actor || "System Scheduler"}</strong>
+                              </span>
                             </span>
-                            {entry.metadata?.call_id && (
-                              <span className="font-mono text-blue-600 bg-blue-50 px-1.5 py-0.2 rounded border border-blue-200 text-[10px]">
-                                Call: #{entry.metadata.call_id.slice(-6)}
+
+                            {callId && (
+                              <button
+                                onClick={() => navigate(`/calls?search=${callId}`)}
+                                className="inline-flex items-center gap-1 font-mono text-blue-700 bg-blue-50/90 hover:bg-blue-100 px-2 py-0.5 rounded border border-blue-200 text-[11px] font-bold transition cursor-pointer"
+                                title="Click to view Call details"
+                              >
+                                <span>Call: #{callId.slice(-6).toUpperCase()}</span>
+                                <ExternalLink className="h-2.5 w-2.5" />
+                              </button>
+                            )}
+
+                            {entry.metadata?.duration_seconds && (
+                              <span className="text-[11px] font-mono text-slate-600 bg-slate-100 px-2 py-0.5 rounded border border-slate-200/60">
+                                Duration: {entry.metadata.duration_seconds}s
+                              </span>
+                            )}
+
+                            {entry.metadata?.pool_name && (
+                              <span className="text-[11px] text-slate-600 bg-slate-100 px-2 py-0.5 rounded border border-slate-200/60">
+                                Pool: {entry.metadata.pool_name}
                               </span>
                             )}
                           </div>
@@ -861,18 +1106,21 @@ export default function FollowUps() {
                   })}
                 </div>
               ) : (
-                <div className="text-center py-8 text-slate-400 text-xs">
-                  <Clock className="h-6 w-6 mx-auto mb-2 text-slate-300" />
-                  No granular timeline events recorded yet.
+                <div className="text-center py-10 text-slate-400 text-xs">
+                  <Clock className="h-7 w-7 mx-auto mb-2 text-slate-300" />
+                  No timeline events found for the selected category.
                 </div>
               )}
             </div>
 
-            {/* Modal Footer */}
-            <div className="pt-3 border-t border-slate-100 flex justify-end">
+            {/* 5. Modal Footer */}
+            <div className="pt-3 border-t border-slate-100 flex items-center justify-between shrink-0">
+              <span className="text-[11px] text-slate-500 font-medium">
+                Showing {groupedTimelineEvents.length} distinct timeline records
+              </span>
               <button
                 onClick={() => setTimelineModalItem(null)}
-                className="px-5 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-white font-bold text-xs"
+                className="px-5 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-white font-bold text-xs transition cursor-pointer shadow-xs active:scale-95"
               >
                 Close Audit Timeline
               </button>
