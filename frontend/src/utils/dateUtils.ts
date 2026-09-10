@@ -64,6 +64,46 @@ export function formatISTDateTime(input: string | Date | undefined | null): stri
 }
 
 /**
+ * Returns formatted two-line IST parts: { date: "09 Sept 2026", time: "04:37 PM IST" }
+ */
+export function formatISTDateParts(input: string | Date | undefined | null): { date: string; time: string } {
+  if (!input) return { date: "Not set", time: "" };
+  const date = parseToDate(input);
+  if (!date) return { date: String(input), time: "" };
+
+  try {
+    const formatter = new Intl.DateTimeFormat("en-IN", {
+      timeZone: IST_TIMEZONE,
+      day: "2-digit",
+      month: "short",
+      year: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: true,
+    });
+
+    const parts = formatter.formatToParts(date);
+    const day = parts.find((p) => p.type === "day")?.value || "";
+    let month = parts.find((p) => p.type === "month")?.value || "";
+    if (month.toLowerCase() === "sep") month = "Sept";
+    const year = parts.find((p) => p.type === "year")?.value || "";
+    const hour = parts.find((p) => p.type === "hour")?.value || "";
+    const minute = parts.find((p) => p.type === "minute")?.value || "";
+    const dayPeriod = (parts.find((p) => p.type === "dayPeriod")?.value || "AM").toUpperCase();
+
+    return {
+      date: `${day} ${month} ${year}`,
+      time: `${hour}:${minute} ${dayPeriod} IST`,
+    };
+  } catch {
+    return {
+      date: date.toLocaleDateString("en-IN", { timeZone: IST_TIMEZONE }),
+      time: date.toLocaleTimeString("en-IN", { timeZone: IST_TIMEZONE }),
+    };
+  }
+}
+
+/**
  * Gets Date and Time in IST as strings for HTML date/time inputs:
  * e.g., date: "2026-09-09", time: "17:15"
  * Accepts optional offset in minutes from now.

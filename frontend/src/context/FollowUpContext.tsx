@@ -79,6 +79,8 @@ export interface FollowUpItem {
   call_attempts_count?: number;
   completion_outcome?: string;
   completion_notes?: string;
+  disposition?: string;
+  final_disposition?: string;
   created_at: string;
   completed_at?: string;
   missed_at?: string;

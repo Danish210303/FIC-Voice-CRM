@@ -5,7 +5,7 @@ import { useFollowUps, FollowUpItem, FollowUpTimelineItem } from "../context/Fol
 import { useAuth } from "../context/AuthContext";
 import { useToast } from "../context/ToastContext";
 import { api } from "../api/client";
-import { formatISTDateTime, parseToDate } from "../utils/dateUtils";
+import { formatISTDateTime, formatISTDateParts, parseToDate } from "../utils/dateUtils";
 import CreateFollowUpModal from "../components/CreateFollowUpModal";
 import {
   Calendar,
@@ -484,24 +484,39 @@ export default function FollowUps() {
         </form>
       </div>
 
-      {/* ── 4. FOLLOW-UPS DATA TABLE ── */}
-      <div className="bg-white border border-slate-200/80 rounded-2xl shadow-2xs overflow-hidden">
-        <div className="overflow-x-auto">
-          <table className="w-full text-left text-xs text-slate-700">
-            <thead className="bg-slate-50/80 border-b border-slate-200/80 text-[11px] font-black uppercase tracking-wider text-slate-500">
+      {/* ── 4. ENTERPRISE BPO FOLLOW-UPS DATA TABLE ── */}
+      <div className="bg-white border border-slate-200/90 rounded-2xl shadow-xs overflow-hidden">
+        <div className="overflow-x-auto max-h-[640px] relative">
+          <table className="w-full text-left text-xs border-collapse">
+            <thead className="sticky top-0 z-10 bg-slate-50/95 backdrop-blur-xs border-b border-slate-200/90 shadow-2xs">
               <tr>
-                <th className="py-3.5 px-4">Customer / Contact</th>
-                <th className="py-3.5 px-4">Agent Assignment & Pool</th>
-                <th className="py-3.5 px-4">Scheduled Time (IST)</th>
-                <th className="py-3.5 px-4">Reason & Notes</th>
-                <th className="py-3.5 px-4">Status & Attempts</th>
-                <th className="py-3.5 px-4">Related Call</th>
-                <th className="py-3.5 px-4 text-right">Actions</th>
+                <th className="py-3 px-4 text-[10.5px] font-bold uppercase tracking-wider text-slate-500 w-[22%]">
+                  Customer / Contact
+                </th>
+                <th className="py-3 px-4 text-[10.5px] font-bold uppercase tracking-wider text-slate-500 w-[17%]">
+                  Agent & Pool
+                </th>
+                <th className="py-3 px-4 text-[10.5px] font-bold uppercase tracking-wider text-slate-500 w-[16%]">
+                  Scheduled (IST)
+                </th>
+                <th className="py-3 px-4 text-[10.5px] font-bold uppercase tracking-wider text-slate-500 w-[19%]">
+                  Reason & Notes
+                </th>
+                <th className="py-3 px-4 text-[10.5px] font-bold uppercase tracking-wider text-slate-500 w-[12%]">
+                  Status & Attempts
+                </th>
+                <th className="py-3 px-4 text-[10.5px] font-bold uppercase tracking-wider text-slate-500 w-[14%]">
+                  Related Call
+                </th>
+                <th className="py-3 px-4 text-right text-[10.5px] font-bold uppercase tracking-wider text-slate-500 w-[10%]">
+                  Actions
+                </th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100 font-medium">
               {filteredItems.map((item) => {
                 const targetDt = item.scheduled_at || item.follow_up_datetime;
+                const istParts = formatISTDateParts(targetDt);
                 const relativeLabel = getRelativeTime(targetDt, item.status);
                 const badge = getStatusBadge(item.status);
                 const isDue = item.status === "due";
@@ -513,10 +528,18 @@ export default function FollowUps() {
                   item.current_agent_name &&
                   item.original_agent_name !== item.current_agent_name;
 
+                const rawPhone = (item.customer_phone || item.phone_number || "").replace(/\D/g, "");
+                const formattedPhone = rawPhone.length >= 10
+                  ? `+91 ${rawPhone.slice(-10, -5)} ${rawPhone.slice(-5)}`
+                  : (rawPhone ? `+91 ${rawPhone}` : "+91 —");
+
+                const shortId = (item.follow_up_id || item.id || "").slice(-8);
+                const attemptsCount = item.call_attempts_count ?? (item.attempts?.length || 0);
+
                 return (
                   <tr
                     key={item.id}
-                    className={`hover:bg-slate-50/80 transition ${
+                    className={`group hover:bg-blue-50/30 transition-colors ${
                       isAutoCalling
                         ? "bg-cyan-50/40"
                         : isDue
@@ -526,126 +549,129 @@ export default function FollowUps() {
                         : ""
                     }`}
                   >
-                    {/* Customer */}
-                    <td className="py-3.5 px-4">
-                      <div className="font-extrabold text-slate-900 text-xs flex items-center gap-1.5">
-                        <span>{item.customer_name || "Customer"}</span>
+                    {/* 1. Customer / Contact */}
+                    <td className="py-3.5 px-4 align-middle">
+                      <div className="text-[14px] font-bold text-slate-900 leading-tight">
+                        {item.customer_name || "Customer"}
                       </div>
-                      <div className="font-mono text-[11px] font-bold text-blue-700 mt-0.5">
-                        +91 {(item.customer_phone || item.phone_number || "").replace(/\D/g, "").slice(-10)}
+                      <div className="text-[12.5px] font-semibold text-blue-700 font-mono mt-0.5 tracking-tight">
+                        {formattedPhone}
                       </div>
-                      {(item.follow_up_id || item.id) && (
-                        <div className="text-[10px] text-slate-400 font-mono mt-0.5">
-                          ID: {(item.follow_up_id || item.id).slice(-8)}
+                      {shortId && (
+                        <div className="text-[11px] font-mono text-slate-400 mt-0.5">
+                          ID: #{shortId}
                         </div>
                       )}
                     </td>
 
-                    {/* Agent & Pool */}
-                    <td className="py-3.5 px-4">
-                      <div className="font-bold text-slate-800 flex items-center gap-1.5">
-                        <User className="h-3 w-3 text-slate-400" />
-                        <span>{item.current_agent_name || item.agent_name || "Unassigned"}</span>
+                    {/* 2. Agent Assignment & Pool */}
+                    <td className="py-3.5 px-4 align-middle">
+                      <div className="flex items-center gap-1.5 text-[13px] font-semibold text-slate-800">
+                        <User className="h-3.5 w-3.5 text-slate-400 shrink-0" />
+                        <span className="truncate">{item.current_agent_name || item.agent_name || "Unassigned"}</span>
                         {isReassigned && (
-                          <span className="px-1.5 py-0.2 rounded text-[9px] font-bold bg-purple-100 text-purple-700 border border-purple-200">
+                          <span className="px-1.5 py-0.2 rounded text-[9.5px] font-bold bg-purple-50 text-purple-700 border border-purple-200 shrink-0">
                             Reassigned
                           </span>
                         )}
                       </div>
+                      <div className="mt-1 flex items-center gap-1">
+                        <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md bg-slate-100/90 text-slate-600 text-[11px] font-medium border border-slate-200/60">
+                          <span className="h-1.5 w-1.5 rounded-full bg-blue-500 shrink-0" />
+                          <span className="truncate max-w-[130px]">{item.pool_name || "Customer Support"}</span>
+                        </span>
+                      </div>
+                    </td>
 
-                      {isReassigned && (
-                        <div className="text-[10px] text-slate-400 font-medium mt-0.5">
-                          Orig: {item.original_agent_name}
-                        </div>
+                    {/* 3. Scheduled Time (IST) */}
+                    <td className="py-3.5 px-4 align-middle">
+                      <div className="text-[13px] font-bold text-slate-900 leading-tight">
+                        {istParts.date}
+                      </div>
+                      <div className="text-[12px] font-mono font-medium text-slate-600 mt-0.5">
+                        {istParts.time || "Time not set"}
+                      </div>
+                      {relativeLabel && (
+                        <span
+                          className={`inline-block text-[10.5px] font-bold px-2 py-0.5 rounded-md mt-1 ${
+                            isAutoCalling
+                              ? "bg-cyan-100 text-cyan-800 border border-cyan-300 animate-pulse"
+                              : isDue
+                              ? "bg-amber-100 text-amber-800 border border-amber-300 animate-pulse"
+                              : isMissed
+                              ? "bg-rose-100 text-rose-800 border border-rose-300"
+                              : isCompleted
+                              ? "bg-emerald-100 text-emerald-800 border border-emerald-200"
+                              : "bg-blue-50 text-blue-800 border border-blue-200"
+                          }`}
+                        >
+                          {relativeLabel}
+                        </span>
                       )}
+                    </td>
 
-                      <div className="text-[11px] text-slate-500 mt-0.5 font-medium flex items-center gap-1">
-                        <span className="h-1.5 w-1.5 rounded-full bg-blue-500" />
-                        <span>{item.pool_name || "Default Pool"}</span>
+                    {/* 4. Reason & Notes */}
+                    <td className="py-3.5 px-4 align-middle max-w-xs">
+                      <div className="text-[13px] font-semibold text-slate-900 leading-tight truncate" title={item.reason}>
+                        {item.reason || "Follow-up after call (Call Back)"}
                       </div>
+                      {item.notes ? (
+                        <p className="text-[12px] text-slate-500 line-clamp-1 truncate mt-0.5" title={item.notes}>
+                          {item.notes}
+                        </p>
+                      ) : (
+                        <p className="text-[11px] text-slate-400 italic mt-0.5">No notes</p>
+                      )}
                     </td>
 
-                    {/* Scheduled Time */}
-                    <td className="py-3.5 px-4">
-                      <div className="font-bold text-slate-900 font-mono text-xs">
-                        {formatDisplayDateTime(targetDt, item.formatted_ist || item.scheduled_at_ist)}
-                      </div>
-                      <span
-                        className={`inline-block text-[10px] font-bold px-2 py-0.5 rounded-full mt-1 ${
-                          isAutoCalling
-                            ? "bg-cyan-100 text-cyan-800 border border-cyan-300 animate-pulse"
-                            : isDue
-                            ? "bg-amber-100 text-amber-800 border border-amber-300 animate-pulse"
-                            : isMissed
-                            ? "bg-rose-100 text-rose-800 border border-rose-300"
-                            : isCompleted
-                            ? "bg-emerald-100 text-emerald-800"
-                            : "bg-blue-100 text-blue-800"
-                        }`}
-                      >
-                        {relativeLabel}
-                      </span>
-                    </td>
-
-                    {/* Reason */}
-                    <td className="py-3.5 px-4 max-w-xs">
-                      <div className="font-bold text-slate-900 truncate">{item.reason || "Call Back"}</div>
-                      {item.notes && <p className="text-[11px] text-slate-500 line-clamp-1 mt-0.5">{item.notes}</p>}
-                    </td>
-
-                    {/* Status Badge & Attempts */}
-                    <td className="py-3.5 px-4">
+                    {/* 5. Status & Attempts */}
+                    <td className="py-3.5 px-4 align-middle">
                       <div className="flex flex-col items-start gap-1">
                         <span
-                          className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10.5px] font-black uppercase tracking-wider border ${badge.bg}`}
+                          className={`inline-flex items-center gap-1.5 px-2.5 py-0.8 rounded-full text-[10.5px] font-bold uppercase tracking-wider border ${badge.bg}`}
                         >
                           <span className={`h-1.5 w-1.5 rounded-full ${badge.dot}`} />
                           {badge.label}
                         </span>
-
-                        {(item.call_attempts_count || (item.attempts && item.attempts.length > 0)) && (
-                          <span className="text-[10px] font-mono text-slate-500 font-bold">
-                            Attempts: {item.call_attempts_count || item.attempts?.length || 0}
-                          </span>
-                        )}
+                        <span className="text-[11px] font-mono text-slate-500 font-medium">
+                          Attempts: {attemptsCount}
+                        </span>
                       </div>
                     </td>
 
-                    {/* Related Call */}
-                    <td className="py-3.5 px-4">
+                    {/* 6. Related Call & Final Disposition */}
+                    <td className="py-3.5 px-4 align-middle">
                       {item.related_call_id || item.original_call_id ? (
-                        <div className="space-y-0.5">
-                          <span className="font-mono text-[11px] font-bold text-blue-600 bg-blue-50 px-2 py-0.5 rounded border border-blue-200">
+                        <div className="space-y-1">
+                          <span className="inline-flex items-center font-mono text-[11px] font-bold text-blue-700 bg-blue-50/90 px-2 py-0.5 rounded border border-blue-200/80">
                             Call #{(item.related_call_id || item.original_call_id || "").slice(-6).toUpperCase()}
                           </span>
-                          {item.completion_outcome && (
-                            <div className="text-[10.5px] font-bold text-slate-600 uppercase">
-                              {item.completion_outcome}
-                            </div>
-                          )}
+                          <div className="text-[11px] font-bold text-slate-700 uppercase tracking-wide">
+                            {item.completion_outcome || item.disposition || "Logged"}
+                          </div>
                         </div>
                       ) : (
-                        <span className="text-slate-400 text-[11px] italic">No call record</span>
+                        <span className="text-slate-400 text-[11px] italic">—</span>
                       )}
                     </td>
 
-                    {/* Actions */}
-                    <td className="py-3.5 px-4 text-right">
+                    {/* 7. Actions */}
+                    <td className="py-3.5 px-4 align-middle text-right">
                       <div className="flex items-center justify-end gap-1.5">
                         {/* Auto-Call Trigger Button */}
                         {!isCompleted && (
                           <button
                             onClick={() => handleTriggerAutoCall(item)}
                             disabled={callingId === item.id || isAutoCalling}
-                            className={`h-8 px-2.5 rounded-lg font-bold text-xs flex items-center gap-1.5 transition active:scale-95 shadow-2xs cursor-pointer ${
+                            className={`h-8 px-2.5 rounded-lg font-bold text-[11.5px] flex items-center gap-1.5 transition active:scale-95 shadow-2xs cursor-pointer ${
                               isAutoCalling
                                 ? "bg-cyan-600 text-white animate-pulse"
                                 : "bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 text-white"
                             }`}
                             title="Trigger Server-Side Auto-Call Now"
                           >
-                            <Zap className={`h-3 w-3 ${callingId === item.id ? "animate-spin" : ""}`} />
-                            <span className="hidden lg:inline">{isAutoCalling ? "Calling..." : "Auto-Call"}</span>
+                            <Zap className={`h-3.5 w-3.5 ${callingId === item.id ? "animate-spin" : ""}`} />
+                            <span className="hidden xl:inline">{isAutoCalling ? "Calling..." : "Auto-Call"}</span>
                           </button>
                         )}
 
@@ -653,20 +679,20 @@ export default function FollowUps() {
                         {!isCompleted && (
                           <button
                             onClick={() => handleDial(item)}
-                            className="h-8 px-2.5 rounded-lg border border-slate-200 hover:bg-slate-100 text-slate-700 font-semibold text-xs flex items-center gap-1 transition active:scale-95 cursor-pointer"
-                            title="Dial Customer in Softphone"
+                            className="h-8 w-8 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 font-semibold flex items-center justify-center transition active:scale-95 cursor-pointer shadow-2xs"
+                            title="Dial Customer via Softphone"
                           >
-                            <Phone className="h-3 w-3 text-slate-500" />
+                            <Phone className="h-3.5 w-3.5 text-slate-600" />
                           </button>
                         )}
 
-                        {/* Timeline Audit Button */}
+                        {/* View Call / Follow-Up Details Button */}
                         <button
                           onClick={() => setTimelineModalItem(item)}
-                          className="h-8 px-2.5 rounded-lg border border-slate-200 hover:bg-slate-100 text-slate-700 font-semibold text-xs transition active:scale-95 cursor-pointer"
-                          title="View Complete Audit Timeline"
+                          className="h-8 w-8 rounded-lg border border-slate-200 bg-white hover:bg-blue-50 hover:text-blue-700 hover:border-blue-200 text-slate-700 font-semibold flex items-center justify-center transition active:scale-95 cursor-pointer shadow-2xs"
+                          title="View Call & Follow-Up Details (Audit Timeline)"
                         >
-                          <History className="h-3 w-3 text-slate-500" />
+                          <History className="h-3.5 w-3.5 text-slate-600" />
                         </button>
 
                         {/* Reassign Button */}
@@ -676,10 +702,10 @@ export default function FollowUps() {
                               setReassignModalItem(item);
                               setSelectedAgentId(item.current_agent_id || item.agent_id || "");
                             }}
-                            className="h-8 px-2.5 rounded-lg border border-purple-200 bg-purple-50 hover:bg-purple-100 text-purple-700 font-semibold text-xs transition active:scale-95 cursor-pointer"
+                            className="h-8 w-8 rounded-lg border border-purple-200 bg-purple-50 hover:bg-purple-100 text-purple-700 font-semibold flex items-center justify-center transition active:scale-95 cursor-pointer shadow-2xs"
                             title="Reassign Agent or Pool"
                           >
-                            <Users className="h-3 w-3" />
+                            <Users className="h-3.5 w-3.5" />
                           </button>
                         )}
 
@@ -692,10 +718,10 @@ export default function FollowUps() {
                                 (item.scheduled_at || item.follow_up_datetime || "").slice(0, 16)
                               );
                             }}
-                            className="h-8 px-2.5 rounded-lg border border-slate-200 hover:bg-slate-100 text-slate-700 font-semibold text-xs transition active:scale-95 cursor-pointer"
-                            title="Reschedule Follow-Up"
+                            className="h-8 w-8 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 font-semibold flex items-center justify-center transition active:scale-95 cursor-pointer shadow-2xs"
+                            title="Reschedule Callback Time"
                           >
-                            <RotateCcw className="h-3 w-3" />
+                            <RotateCcw className="h-3.5 w-3.5 text-slate-600" />
                           </button>
                         )}
 
@@ -703,10 +729,10 @@ export default function FollowUps() {
                         {!isCompleted && (
                           <button
                             onClick={() => setCompleteModalItem(item)}
-                            className="h-8 px-2.5 rounded-lg border border-emerald-200 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 font-semibold text-xs transition active:scale-95 cursor-pointer"
-                            title="Mark Completed"
+                            className="h-8 w-8 rounded-lg border border-emerald-200 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 font-semibold flex items-center justify-center transition active:scale-95 cursor-pointer shadow-2xs"
+                            title="Mark Follow-Up Completed"
                           >
-                            <Check className="h-3 w-3" />
+                            <Check className="h-3.5 w-3.5" />
                           </button>
                         )}
                       </div>
