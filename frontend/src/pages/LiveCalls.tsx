@@ -833,6 +833,7 @@ export default function LiveCalls() {
       end: "Terminating live call session",
     };
 
+    
     showToast(`${actionLabels[action]} for Call ${targetCall.formatted_lead_id}`, "success");
 
     if (action === "end") {

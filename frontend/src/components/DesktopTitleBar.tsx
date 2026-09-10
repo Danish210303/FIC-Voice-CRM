@@ -52,10 +52,16 @@ export const DesktopTitleBar: React.FC<DesktopTitleBarProps> = () => {
   };
 
   const handleUrlSaved = () => {
-    setCurrentUrl(getBaseUrl());
+    const newUrl = getBaseUrl();
+    setCurrentUrl(newUrl);
     setHealthStatus('checking');
     api.checkHealth()
-      .then(() => setHealthStatus('connected'))
+      .then(() => {
+        setHealthStatus('connected');
+        if (typeof window !== 'undefined') {
+          window.location.reload();
+        }
+      })
       .catch(() => setHealthStatus('error'));
   };
 

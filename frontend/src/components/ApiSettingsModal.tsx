@@ -107,9 +107,53 @@ export const ApiSettingsModal: React.FC<ApiSettingsModalProps> = ({
 
         {/* Content */}
         <div className="p-6 space-y-5 text-sm text-gray-300">
+          {/* Quick Presets */}
           <div>
             <label className="block text-xs font-semibold uppercase tracking-wider text-gray-400 mb-2">
-              Render API Base URL
+              Quick Environments
+            </label>
+            <div className="grid grid-cols-2 gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  setApiUrl('http://localhost:8000');
+                  setTestResult(null);
+                }}
+                className={`px-3 py-2 rounded-lg border text-left text-xs transition flex flex-col gap-0.5 ${
+                  apiUrl.includes('localhost') || apiUrl.includes('127.0.0.1')
+                    ? 'bg-amber-500/15 border-amber-500/50 text-amber-300'
+                    : 'bg-gray-950/60 border-gray-800 text-gray-400 hover:border-gray-700 hover:text-gray-200'
+                }`}
+              >
+                <span className="font-bold flex items-center gap-1.5 text-gray-200">
+                  ⚡ Localhost (Port 8000)
+                </span>
+                <span className="font-mono text-[10px] opacity-75">http://localhost:8000</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => {
+                  setApiUrl('https://ai-voice-agent-crm.onrender.com');
+                  setTestResult(null);
+                }}
+                className={`px-3 py-2 rounded-lg border text-left text-xs transition flex flex-col gap-0.5 ${
+                  apiUrl.includes('onrender.com')
+                    ? 'bg-amber-500/15 border-amber-500/50 text-amber-300'
+                    : 'bg-gray-950/60 border-gray-800 text-gray-400 hover:border-gray-700 hover:text-gray-200'
+                }`}
+              >
+                <span className="font-bold flex items-center gap-1.5 text-gray-200">
+                  ☁️ Production Render
+                </span>
+                <span className="font-mono text-[10px] opacity-75">ai-voice-agent-crm.onrender.com</span>
+              </button>
+            </div>
+          </div>
+
+          <div>
+            <label className="block text-xs font-semibold uppercase tracking-wider text-gray-400 mb-2">
+              API Base URL
             </label>
             <div className="relative flex items-center">
               <Globe className="absolute left-3 w-4 h-4 text-gray-500" />
@@ -120,7 +164,7 @@ export const ApiSettingsModal: React.FC<ApiSettingsModalProps> = ({
                   setApiUrl(e.target.value);
                   setTestResult(null);
                 }}
-                placeholder="https://your-render-backend.onrender.com"
+                placeholder="http://localhost:8000 or https://ai-voice-agent-crm.onrender.com"
                 className="w-full pl-9 pr-24 py-2.5 bg-gray-950 border border-gray-700/80 rounded-lg text-gray-100 placeholder-gray-600 focus:outline-none focus:border-amber-500 text-sm font-mono transition-colors"
               />
               <button
@@ -133,8 +177,7 @@ export const ApiSettingsModal: React.FC<ApiSettingsModalProps> = ({
               </button>
             </div>
             <p className="mt-2 text-xs text-gray-500">
-              Enter your deployed Render backend domain (e.g.,{' '}
-              <code className="text-amber-400 font-mono text-[11px]">https://forge-crm-api.onrender.com</code>).
+              Active WebSocket Endpoint: <code className="text-amber-400 font-mono text-[11px]">{apiUrl.startsWith('https') ? 'wss://' : 'ws://'}{apiUrl.replace(/^https?:\/\//, '')}/ws/global</code>
             </p>
           </div>
 

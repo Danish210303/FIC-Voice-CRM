@@ -1,8 +1,9 @@
 /**
- * Dynamic API Base URL Resolver.
- * Connects directly to the production Render backend API (https://ai-voice-agent-crm.onrender.com).
+ * Centralized API & WebSocket Base URL Resolver.
+ * Connects to local FastAPI backend (http://localhost:8000) or production Render backend.
  */
-const RENDER_PROD_URL = "https://ai-voice-agent-crm.onrender.com";
+export const LOCAL_DEV_URL = "http://localhost:8000";
+export const RENDER_PROD_URL = "https://ai-voice-agent-crm.onrender.com";
 
 let currentBaseUrl: string | null = null;
 
@@ -17,7 +18,8 @@ export const getBaseUrl = (): string => {
   if (envUrl && typeof envUrl === "string" && envUrl.trim() !== "") {
     return envUrl.trim().replace(/\/+$/, "");
   }
-  return RENDER_PROD_URL;
+  // Default: Use local backend in dev mode, Render cloud in production build
+  return (import.meta as any).env?.DEV ? LOCAL_DEV_URL : RENDER_PROD_URL;
 };
 
 export const setCustomApiUrl = (newUrl: string | null) => {
@@ -57,7 +59,9 @@ export const getWsUrl = (roomPath: string = ""): string => {
     const wsProtocol = urlObj.protocol === "https:" ? "wss:" : "ws:";
     return `${wsProtocol}//${urlObj.host}/ws${cleanPath}${tokenQuery}`;
   } catch {
-    return `wss://ai-voice-agent-crm.onrender.com/ws${cleanPath}${tokenQuery}`;
+    const defaultHost = (import.meta as any).env?.DEV ? "localhost:8000" : "ai-voice-agent-crm.onrender.com";
+    const defaultProtocol = (import.meta as any).env?.DEV ? "ws:" : "wss:";
+    return `${defaultProtocol}//${defaultHost}/ws${cleanPath}${tokenQuery}`;
   }
 };
 

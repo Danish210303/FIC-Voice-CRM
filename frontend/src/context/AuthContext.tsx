@@ -21,15 +21,56 @@ const AuthContext = createContext<AuthContextType | null>(null);
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(() => {
-    const stored = localStorage.getItem("user");
-    return stored ? JSON.parse(stored) : null;
+    const token = typeof localStorage !== "undefined" ? localStorage.getItem("access_token") : null;
+    const stored = typeof localStorage !== "undefined" ? localStorage.getItem("user") : null;
+    if (!token || !stored) return null;
+    try {
+      return JSON.parse(stored);
+    } catch {
+      return null;
+    }
   });
 
   const logout = useCallback(() => {
-    localStorage.removeItem("access_token");
-    localStorage.removeItem("user");
+    if (typeof localStorage !== "undefined") {
+      localStorage.removeItem("access_token");
+      localStorage.removeItem("user");
+    }
     setUser(null);
+    if (typeof window !== "undefined") {
+      window.location.hash = "#/login";
+    }
   }, []);
+
+  // Proactively validate token on startup/mount
+  useEffect(() => {
+    const token = localStorage.getItem("access_token");
+    if (token) {
+      api.get("/api/auth/me")
+        .then((userData: any) => {
+          if (userData && (userData.id || userData._id)) {
+            const formattedUser: User = {
+              id: userData.id || userData._id,
+              name: userData.name || "Agent",
+              role: userData.role || "agent",
+              employee_id: userData.employee_id || "",
+              email: userData.email,
+              pool_id: userData.pool_id || null,
+              shift: userData.shift || null,
+            };
+            setUser(formattedUser);
+            localStorage.setItem("user", JSON.stringify(formattedUser));
+          }
+        })
+        .catch((err: any) => {
+          if (err?.status === 401 || err?.name === "AuthError") {
+            logout();
+          }
+        });
+    } else {
+      logout();
+    }
+  }, [logout]);
 
   useEffect(() => {
     const handleUnauthorized = () => {
