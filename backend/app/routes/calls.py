@@ -2897,7 +2897,7 @@ async def start_vapi_dial(payload: VapiDialPayload, user: dict = Depends(get_cur
                 }
             )
 
-        base_url = getattr(settings, 'BASE_URL', 'https://ai-voice-agent-crm.onrender.com').rstrip('/')
+        base_url = getattr(settings, 'BASE_URL', 'https://fic-voice-crm.onrender.com').rstrip('/')
         vapi_payload = {
             "assistantId": vapi_assistant_id,
             "phoneNumberId": vapi_phone_id,
@@ -3185,7 +3185,7 @@ async def start_manual_dial(payload: ManualDialPayload, user: dict = Depends(get
     plivo_auth_id = getattr(settings, 'PLIVO_AUTH_ID', '') or os.getenv('PLIVO_AUTH_ID', '')
     plivo_auth_token = getattr(settings, 'PLIVO_AUTH_TOKEN', '') or os.getenv('PLIVO_AUTH_TOKEN', '')
     plivo_phone_number = getattr(settings, 'PLIVO_PHONE_NUMBER', '+918031826757')
-    base_url = getattr(settings, 'BASE_URL', '') or os.getenv('BASE_URL', 'https://ai-voice-agent-crm.onrender.com')
+    base_url = getattr(settings, 'BASE_URL', '') or os.getenv('BASE_URL', 'https://fic-voice-crm.onrender.com')
 
     # Plivo Outbound PSTN Call trigger (Agent-First Click-to-Call 2-Way Audio Bridging)
     agent_phone_val = user.get("agent_phone") or user.get("phone") or ""

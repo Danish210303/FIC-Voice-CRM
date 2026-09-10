@@ -25,7 +25,7 @@ class Settings(BaseSettings):
     PLIVO_SIP_URI: str = "sip:42024221415255694@app.plivo.com"
     PLIVO_AUTH_ID: str = "MAZMI2Y2Y5NJATNWE1ZC"
     PLIVO_AUTH_TOKEN: str = "YmFiYmVjMGItMjQzNS00YWVjLTVkODctZTQzOWU3"
-    BASE_URL: str = "https://ai-voice-agent-crm.onrender.com"
+    BASE_URL: str = "https://fic-voice-crm.onrender.com"
     CLOUDINARY_CLOUD_NAME: str = "forge-crm"
     CLOUDINARY_API_KEY: str = ""
     CLOUDINARY_API_SECRET: str = ""

@@ -15,7 +15,9 @@
     "target": [
       "nsis"
     ],
-    "icon": "public/login.png"
+    "icon": "public/login.png",
+    "signAndEditExecutable": false,
+    "forceCodeSigning": false
   },
   "nsis": {
     "oneClick": false,

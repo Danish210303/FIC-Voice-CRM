@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: forge-crm-backend
+    name: fic-voice-crm
     env: python
     region: singapore
     buildCommand: "pip install -r backend/requirements.txt"

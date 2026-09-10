@@ -77,7 +77,7 @@ export const ApiSettingsModal: React.FC<ApiSettingsModalProps> = ({
   };
 
   const handleResetDefault = () => {
-    const envUrl = import.meta.env.VITE_API_URL || 'https://ai-voice-agent-crm.onrender.com';
+    const envUrl = import.meta.env.VITE_API_URL || 'https://fic-voice-crm.onrender.com';
     setApiUrl(envUrl);
     setCustomApiUrl(null);
     setTestResult(null);
@@ -134,7 +134,7 @@ export const ApiSettingsModal: React.FC<ApiSettingsModalProps> = ({
               <button
                 type="button"
                 onClick={() => {
-                  setApiUrl('https://ai-voice-agent-crm.onrender.com');
+                  setApiUrl('https://fic-voice-crm.onrender.com');
                   setTestResult(null);
                 }}
                 className={`px-3 py-2 rounded-lg border text-left text-xs transition flex flex-col gap-0.5 ${
@@ -146,7 +146,7 @@ export const ApiSettingsModal: React.FC<ApiSettingsModalProps> = ({
                 <span className="font-bold flex items-center gap-1.5 text-gray-200">
                   ☁️ Production Render
                 </span>
-                <span className="font-mono text-[10px] opacity-75">ai-voice-agent-crm.onrender.com</span>
+                <span className="font-mono text-[10px] opacity-75">fic-voice-crm.onrender.com</span>
               </button>
             </div>
           </div>
@@ -164,7 +164,7 @@ export const ApiSettingsModal: React.FC<ApiSettingsModalProps> = ({
                   setApiUrl(e.target.value);
                   setTestResult(null);
                 }}
-                placeholder="http://localhost:8000 or https://ai-voice-agent-crm.onrender.com"
+                placeholder="http://localhost:8000 or https://fic-voice-crm.onrender.com"
                 className="w-full pl-9 pr-24 py-2.5 bg-gray-950 border border-gray-700/80 rounded-lg text-gray-100 placeholder-gray-600 focus:outline-none focus:border-amber-500 text-sm font-mono transition-colors"
               />
               <button

@@ -3,7 +3,7 @@
  * Connects to local FastAPI backend (http://localhost:8000) or production Render backend.
  */
 export const LOCAL_DEV_URL = "http://localhost:8000";
-export const RENDER_PROD_URL = "https://ai-voice-agent-crm.onrender.com";
+export const RENDER_PROD_URL = "https://fic-voice-crm.onrender.com";
 
 let currentBaseUrl: string | null = null;
 
@@ -33,7 +33,7 @@ export const setCustomApiUrl = (newUrl: string | null) => {
   currentBaseUrl = null;
 };
 
-const BASE_URL = getBaseUrl();
+export const BASE_URL = getBaseUrl();
 
 function getToken(): string | null {
   return localStorage.getItem("access_token");
@@ -59,7 +59,7 @@ export const getWsUrl = (roomPath: string = ""): string => {
     const wsProtocol = urlObj.protocol === "https:" ? "wss:" : "ws:";
     return `${wsProtocol}//${urlObj.host}/ws${cleanPath}${tokenQuery}`;
   } catch {
-    const defaultHost = (import.meta as any).env?.DEV ? "localhost:8000" : "ai-voice-agent-crm.onrender.com";
+    const defaultHost = (import.meta as any).env?.DEV ? "localhost:8000" : "fic-voice-crm.onrender.com";
     const defaultProtocol = (import.meta as any).env?.DEV ? "ws:" : "wss:";
     return `${defaultProtocol}//${defaultHost}/ws${cleanPath}${tokenQuery}`;
   }
@@ -221,4 +221,4 @@ export const api = {
   },
 };
 
-export { BASE_URL, getToken };
+export { getToken };

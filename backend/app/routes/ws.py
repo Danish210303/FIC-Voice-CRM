@@ -71,8 +71,10 @@ async def global_ws(websocket: WebSocket, token: str | None = None):
         while True:
             # Keep connection alive & handle incoming pings
             msg = await websocket.receive_text()
-            if msg == "ping":
-                await websocket.send_text("pong")
+            if msg:
+                m_str = msg.strip().lower()
+                if m_str == "ping" or '"ping"' in m_str:
+                    await websocket.send_text("pong")
     except WebSocketDisconnect:
         logger.info(f"[WS DISCONNECT] Global room disconnected by '{user_str}'")
         ws_manager.disconnect("global", websocket)
@@ -92,8 +94,10 @@ async def pool_ws(websocket: WebSocket, pool_id: str, token: str | None = None):
     try:
         while True:
             msg = await websocket.receive_text()
-            if msg == "ping":
-                await websocket.send_text("pong")
+            if msg:
+                m_str = msg.strip().lower()
+                if m_str == "ping" or '"ping"' in m_str:
+                    await websocket.send_text("pong")
     except WebSocketDisconnect:
         logger.info(f"[WS DISCONNECT] Pool '{pool_id}' disconnected by '{user_str}'")
         ws_manager.disconnect(pool_id, websocket)
@@ -114,8 +118,10 @@ async def generic_ws(websocket: WebSocket, room_id: str, token: str | None = Non
     try:
         while True:
             msg = await websocket.receive_text()
-            if msg == "ping":
-                await websocket.send_text("pong")
+            if msg:
+                m_str = msg.strip().lower()
+                if m_str == "ping" or '"ping"' in m_str:
+                    await websocket.send_text("pong")
     except WebSocketDisconnect:
         logger.info(f"[WS DISCONNECT] Room '{target_room}' disconnected by '{user_str}'")
         ws_manager.disconnect(target_room, websocket)
@@ -135,8 +141,10 @@ async def root_ws(websocket: WebSocket, token: str | None = None):
     try:
         while True:
             msg = await websocket.receive_text()
-            if msg == "ping":
-                await websocket.send_text("pong")
+            if msg:
+                m_str = msg.strip().lower()
+                if m_str == "ping" or '"ping"' in m_str:
+                    await websocket.send_text("pong")
     except WebSocketDisconnect:
         ws_manager.disconnect("global", websocket)
     except Exception as e:

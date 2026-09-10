@@ -1,8 +1,9 @@
+import os
 import urllib.request
 import json
 import sys
 
-BASE_URL = "http://localhost:8000"
+BASE_URL = os.getenv("API_URL", "https://fic-voice-crm.onrender.com").rstrip("/")
 
 def log(msg):
     print(f"[TEST ENDPOINTS] {msg}")
