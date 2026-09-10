@@ -2124,20 +2124,21 @@ async def record_call_disposition(call_id: str, payload: CallDispositionPayload,
     except Exception as e:
         logger.warning(f"[DISPOSITION RECORDING] Error processing recording: {e}")
     
-    # 1. Auto-link any existing/due follow-up task to this completed call
-    try:
-        await auto_link_follow_up_on_call_completed(
-            call_id=str(call_id),
-            agent_id=agent_id,
-            phone=call.get("phone") or "",
-            lead_id=str(call.get("lead_id")) if call.get("lead_id") else None,
-            outcome=payload.disposition,
-            notes=payload.notes
-        )
-    except Exception as fe:
-        logger.warning(f"[DISPOSITION FOLLOW-UP LINK] {fe}")
+    # 1. Auto-link any existing/due follow-up task to this completed call ONLY for terminal outcomes (NOT when scheduling a callback)
+    if payload.disposition not in ["call_back", "follow_up_required", "follow_up"]:
+        try:
+            await auto_link_follow_up_on_call_completed(
+                call_id=str(call_id),
+                agent_id=agent_id,
+                phone=call.get("phone") or "",
+                lead_id=str(call.get("lead_id")) if call.get("lead_id") else None,
+                outcome=payload.disposition,
+                notes=payload.notes
+            )
+        except Exception as fe:
+            logger.warning(f"[DISPOSITION FOLLOW-UP LINK] {fe}")
 
-    # 2. Automatically create a scheduled Follow-Up if agent requested follow-up / callback
+    # 2. Automatically create or update a scheduled Follow-Up if agent requested follow-up / callback
     if payload.follow_up_date or payload.follow_up_time or payload.disposition in ["follow_up_required", "call_back"]:
         try:
             fu_date_val = (payload.follow_up_date or "").strip()
@@ -2216,6 +2217,9 @@ async def record_call_disposition(call_id: str, payload: CallDispositionPayload,
                     "reason": payload.notes or f"Follow-up after call ({payload.disposition.replace('_', ' ').title()})",
                     "notes": payload.notes or "",
                     "status": fu_status,
+                    "completed_at": None,
+                    "completion_outcome": None,
+                    "completion_notes": None,
                     "priority": "medium",
                     "time_zone": "Asia/Kolkata",
                     "updated_at": utcnow()
@@ -2228,6 +2232,7 @@ async def record_call_disposition(call_id: str, payload: CallDispositionPayload,
                     }
                 )
                 fu_doc = {**existing_fu, **update_fu_payload, "_id": existing_fu["_id"]}
+
             else:
                 fu_doc = {
                     "customer_id": str(call.get("lead_id") or call.get("phone") or utcnow().timestamp()),
@@ -3604,7 +3609,7 @@ async def end_manual_call(call_id: str, payload: CallEnd, user: dict = Depends(g
         except Exception as pe:
             logger.warning(f"[MANUAL END PRESENCE] {pe}")
 
-    if payload.outcome and payload.outcome not in ("wrap_up", "live", "ringing"):
+    if payload.outcome and payload.outcome not in ("wrap_up", "live", "ringing", "call_back", "follow_up_required", "follow_up"):
         try:
             await auto_link_follow_up_on_call_completed(
                 call_id=str(call_id),

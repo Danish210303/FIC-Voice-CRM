@@ -352,6 +352,9 @@ async def create_or_update_lead_follow_up(
             "reason": reason or (notes or existing_fu.get("reason", "Follow-Up Call")),
             "notes": notes or existing_fu.get("notes", ""),
             "status": status_val,
+            "completed_at": None,
+            "completion_outcome": None,
+            "completion_notes": None,
             "priority": priority or existing_fu.get("priority", "medium"),
             "current_agent_id": target_agent_id or existing_fu.get("current_agent_id", ""),
             "current_agent_name": agent_name or existing_fu.get("current_agent_name", "Agent"),
@@ -373,6 +376,7 @@ async def create_or_update_lead_follow_up(
             }
         )
         doc = {**existing_fu, **update_payload, "_id": existing_fu["_id"]}
+
     else:
         doc = {
             "customer_id": actual_lead_id or cust_phone or str(now.timestamp()),
@@ -929,9 +933,13 @@ async def auto_link_follow_up_on_call_completed(
     call_duration: Optional[int] = None
 ) -> Optional[Dict[str, Any]]:
     """
-    When a call completes, marks the linked or pending follow-up as COMPLETED,
-    records outcome, call duration, and audit timeline.
+    When a call completes with a final outcome (e.g. interested, converted, not_interested, dnc),
+    marks the linked active follow-up as COMPLETED.
+    Never marks future scheduled follow-ups as completed, and never treats 'call_back' as a completion.
     """
+    if outcome.lower() in ("call_back", "follow_up_required", "follow_up", "wrap_up", "live", "ringing"):
+        return None
+
     if not phone and not lead_id and not call_id:
         return None
 
@@ -941,14 +949,19 @@ async def auto_link_follow_up_on_call_completed(
     clean_p = normalize_phone(phone) if phone else ""
     raw_digits = "".join(filter(str.isdigit, clean_p))[-10:] if clean_p else ""
 
-    # Priority 1: Check by direct related_call_id
+    # Priority 1: Check by direct related_call_id if that follow-up was actively triggered for this call
     matching_fu = None
     if call_id:
-        matching_fu = await follow_ups_col.find_one({"related_call_id": str(call_id)})
+        matching_fu = await follow_ups_col.find_one({
+            "related_call_id": str(call_id),
+            "status": {"$in": ["auto_calling", "connected", "due", "waiting_for_agent", "in_call"]}
+        })
 
+    # Priority 2: Check for currently due / active follow-ups for this lead or phone (NEVER future scheduled)
     if not matching_fu:
         query: Dict[str, Any] = {
-            "status": {"$in": ["scheduled", "due", "waiting_for_agent", "auto_calling", "connected", "no_answer", "missed"]}
+            "status": {"$in": ["due", "waiting_for_agent", "auto_calling", "connected", "no_answer", "missed"]},
+            "follow_up_datetime": {"$lte": now + timedelta(minutes=5)}
         }
         or_conditions = []
         if lead_id and ObjectId.is_valid(lead_id):
