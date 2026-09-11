@@ -1,5 +1,5 @@
 import { createContext, useContext, useState, ReactNode, useCallback, useMemo, useEffect } from "react";
-import { api } from "../api/client";
+import { api, isTokenExpired } from "../api/client";
 
 type User = {
   id: string;
@@ -23,7 +23,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(() => {
     const token = typeof localStorage !== "undefined" ? localStorage.getItem("access_token") : null;
     const stored = typeof localStorage !== "undefined" ? localStorage.getItem("user") : null;
-    if (!token || !stored) return null;
+    if (!token || !stored || isTokenExpired(token)) {
+      if (typeof localStorage !== "undefined") {
+        localStorage.removeItem("access_token");
+        localStorage.removeItem("user");
+      }
+      return null;
+    }
     try {
       return JSON.parse(stored);
     } catch {

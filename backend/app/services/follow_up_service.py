@@ -201,8 +201,12 @@ async def is_agent_ready_for_call(agent_user: Dict[str, Any]) -> bool:
     is_active = agent_user.get("is_active", True)
     if not is_active:
         return False
-    # Agent must be in ready or online state (not paused/break/in_call/on_call/offline)
-    return status_val in ("ready", "online")
+    # Agent must be in ready, online, or available state (not paused/break/in_call/on_call/offline)
+    if status_val not in ("ready", "online", "available"):
+        return False
+    if agent_user.get("currentCallId"):
+        return False
+    return True
 
 
 async def find_available_pool_agent(
@@ -210,44 +214,39 @@ async def find_available_pool_agent(
     exclude_agent_ids: Optional[List[str]] = None
 ) -> Optional[Dict[str, Any]]:
     """
-    Finds an available and ready agent in the same pool for fallback callback routing.
-    Prefers longest-idle agent.
+    Finds an available and ready agent in the same pool for callback routing.
+    Prefers longest-idle agent. Respects strict pool isolation.
     """
     exclude_oids = [_safe_oid(a) for a in (exclude_agent_ids or []) if _safe_oid(a)]
     exclude_strs = [str(a) for a in (exclude_agent_ids or [])]
 
     query: Dict[str, Any] = {
-        "status": {"$in": ["ready", "online"]},
-        "is_active": True
+        "status": {"$in": ["ready", "online", "available"]},
+        "is_active": True,
+        "$or": [
+            {"currentCallId": None},
+            {"currentCallId": ""},
+            {"currentCallId": {"$exists": False}}
+        ]
     }
 
     if pool_id and pool_id != "general":
-        query["pool_id"] = pool_id
+        p_oid = _safe_oid(pool_id)
+        pool_cond = [{"pool_id": pool_id}]
+        if p_oid:
+            pool_cond.append({"pool_id": p_oid})
+        query["$and"] = [{"$or": pool_cond}]
 
     if exclude_oids or exclude_strs:
-        query["_id"] = {"$nin": exclude_oids}
+        nin_list = list(set(exclude_oids + [s for s in exclude_strs if ObjectId.is_valid(s)]))
+        query["_id"] = {"$nin": nin_list}
 
-    # Query matching available agents
+    # Query matching available agents within assigned pool
     candidate = await users_col.find_one(
         query,
         sort=[("last_call_at", 1), ("last_status_change", 1)]
     )
-    if candidate:
-        return candidate
-
-    # Fallback to any ready agent across all pools if specific pool has none
-    if pool_id and pool_id != "general":
-        general_query = {
-            "status": {"$in": ["ready", "online"]},
-            "is_active": True
-        }
-        if exclude_oids:
-            general_query["_id"] = {"$nin": exclude_oids}
-        candidate = await users_col.find_one(
-            general_query,
-            sort=[("last_call_at", 1), ("last_status_change", 1)]
-        )
-        return candidate
+    return candidate
 
     return None
 
@@ -514,10 +513,11 @@ async def initiate_auto_callback_for_agent(
     pool_id = str(fu_doc.get("pool_id") or agent_user.get("pool_id") or "general")
     lead_id = fu_doc.get("lead_id")
 
-    # Create Call Document
+    # Create Call Document in RINGING state
     call_doc = {
         "direction": "outbound",
         "status": "live",
+        "call_status": "ringing",
         "is_ai": False,
         "auto_dialed": True,
         "follow_up_id": fu_id,
@@ -528,6 +528,7 @@ async def initiate_auto_callback_for_agent(
         "phone": customer_phone,
         "caller_name": customer_name,
         "caller_phone": customer_phone,
+        "ringing_started_at": now,
         "started_at": now,
         "created_at": now,
         "notes": f"Auto-Callback for Follow-Up #{fu_id} ({fu_doc.get('reason', '')})"
@@ -536,12 +537,12 @@ async def initiate_auto_callback_for_agent(
     call_id = str(call_res.inserted_id)
     call_doc["_id"] = call_res.inserted_id
 
-    # Update Agent Presence in DB
+    # Update Agent Presence in DB to RINGING
     try:
         await users_col.update_one(
             {"_id": agent_user["_id"]},
             {"$set": {
-                "status": "in_call",
+                "status": "ringing",
                 "currentCallId": call_id,
                 "last_call_at": now,
                 "updated_at": now
@@ -550,21 +551,21 @@ async def initiate_auto_callback_for_agent(
     except Exception as e:
         logger.warning(f"[AUTO-CALL PRESENCE] Could not update agent {agent_id} presence: {e}")
 
-    # Update Follow-Up status to AUTO_CALLING
+    # Update Follow-Up status to RINGING
     attempt_entry = {
         "attempt_number": (fu_doc.get("call_attempts_count") or 0) + 1,
         "call_id": call_id,
         "agent_id": agent_id,
         "agent_name": agent_name,
         "timestamp": now.isoformat(),
-        "status": "auto_calling"
+        "status": "ringing"
     }
 
     timeline_entry = {
         "id": f"evt_{uuid.uuid4().hex[:8]}",
         "timestamp": now.isoformat(),
-        "action": "AUTO_CALL_INITIATED",
-        "description": f"Auto-Callback initiated with {customer_name} ({customer_phone}) -> Assigned to {agent_name} (Call #{call_id[-6:].upper()})",
+        "action": "CALL_RINGING",
+        "description": f"Auto-Callback ringing customer {customer_name} ({customer_phone}) -> Connected to assigned agent {agent_name} (Call #{call_id[-6:].upper()})",
         "actor": "Auto-Call Engine",
         "actor_role": "System Scheduler",
         "metadata": {
@@ -579,7 +580,7 @@ async def initiate_auto_callback_for_agent(
         {"_id": fu_doc["_id"]},
         {
             "$set": {
-                "status": "auto_calling",
+                "status": "ringing",
                 "current_agent_id": agent_id,
                 "current_agent_name": agent_name,
                 "agent_id": agent_id,
@@ -635,10 +636,10 @@ async def initiate_auto_callback_for_agent(
         except Exception as plivo_err:
             logger.warning(f"[AUTO-CALL PLIVO BRIDGE ERROR] {plivo_err}")
 
-    # Broadcast WebSocket Event to target agent console & supervisor dashboard
-    auto_call_event = {
-        "event": "FOLLOW_UP_AUTO_CALLING",
-        "type": "follow_up_auto_calling",
+    # Broadcast WebSocket Events to agent softphone console & supervisor dashboard
+    ringing_event = {
+        "event": "FOLLOW_UP_RINGING",
+        "type": "follow_up_ringing",
         "follow_up_id": fu_id,
         "id": fu_id,
         "call_id": call_id,
@@ -650,14 +651,27 @@ async def initiate_auto_callback_for_agent(
         "customer_phone": customer_phone,
         "phone": customer_phone,
         "pool_id": pool_id,
-        "status": "auto_calling",
+        "status": "ringing",
         "is_follow_up": True,
         "reason": fu_doc.get("reason", "Scheduled Callback"),
         "timestamp": now.isoformat()
     }
 
-    # Dispatch to global channel and targeted agent room
-    await ws_manager.broadcast_global(auto_call_event)
+    await ws_manager.broadcast_global(ringing_event)
+    await ws_manager.broadcast_global({
+        "event": "FOLLOW_UP_AUTO_CALLING",
+        **ringing_event
+    })
+    await ws_manager.broadcast_global({
+        "event": "CALL_RINGING",
+        "call_id": call_id,
+        "agent_id": agent_id,
+        "agent_name": agent_name,
+        "phone": customer_phone,
+        "caller_name": customer_name,
+        "is_follow_up": True,
+        "timestamp": now.isoformat()
+    })
     await ws_manager.broadcast_global({
         "event": "inbound_call_auto_answered",
         "call_id": call_id,
@@ -728,6 +742,19 @@ async def process_scheduled_auto_calls() -> Dict[str, Any]:
 
             if not locked_fu:
                 continue  # Another worker tick already acquired this follow-up
+
+            # Check if there is already an active call in progress for this follow-up (Idempotency)
+            if locked_fu.get("related_call_id"):
+                existing_call = await calls_col.find_one({
+                    "$or": [
+                        {"_id": _safe_oid(locked_fu["related_call_id"])},
+                        {"follow_up_id": fu_id}
+                    ],
+                    "status": "live"
+                })
+                if existing_call:
+                    logger.info(f"[AUTO-CALL ENGINE] Call #{existing_call['_id']} already active for Follow-Up #{fu_id}. Skipping duplicate trigger.")
+                    continue
 
             customer_name = locked_fu.get("customer_name", "Customer")
             customer_phone = locked_fu.get("customer_phone", "")
@@ -996,13 +1023,13 @@ async def auto_link_follow_up_on_call_completed(
     if call_id:
         matching_fu = await follow_ups_col.find_one({
             "related_call_id": str(call_id),
-            "status": {"$in": ["auto_calling", "connected", "due", "waiting_for_agent", "in_call"]}
+            "status": {"$in": ["ringing", "auto_calling", "connected", "due", "waiting_for_agent", "in_call", "wrap_up"]}
         })
 
     # Priority 2: Check for currently due / active follow-ups for this lead or phone (NEVER future scheduled)
     if not matching_fu:
         query: Dict[str, Any] = {
-            "status": {"$in": ["due", "waiting_for_agent", "auto_calling", "connected", "no_answer", "missed"]},
+            "status": {"$in": ["due", "waiting_for_agent", "ringing", "auto_calling", "connected", "in_call", "wrap_up", "no_answer", "missed"]},
             "follow_up_datetime": {"$lte": now + timedelta(minutes=5)}
         }
         or_conditions = []

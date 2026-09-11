@@ -3,6 +3,7 @@ import httpx
 import logging
 import os
 import re
+import uuid
 from urllib.parse import quote
 from bson import ObjectId
 from fastapi import APIRouter, Depends, HTTPException, Query, Body, status, Request, Form
@@ -173,6 +174,46 @@ async def plivo_answer_webhook(request: Request):
                     await record_presence_change(user_id=str(active_call["agent_id"]), new_status="in_call")
                 except Exception as pe:
                     logger.warning(f"[PLIVO ANSWER PRESENCE] {pe}")
+
+            if active_call.get("follow_up_id"):
+                try:
+                    fu_oid = _safe_oid(active_call["follow_up_id"])
+                    if fu_oid:
+                        conn_timeline = {
+                            "id": f"evt_{uuid.uuid4().hex[:8]}",
+                            "timestamp": conn_now_iso,
+                            "action": "CALL_CONNECTED",
+                            "description": f"Customer answered callback call #{str(active_call['_id'])[-6:].upper()}",
+                            "actor": "Plivo Voice Bridge",
+                            "actor_role": "Telephony Provider",
+                            "metadata": {
+                                "call_id": str(active_call["_id"]),
+                                "call_sid": call_uuid,
+                                "agent_id": str(active_call.get("agent_id", "")),
+                            }
+                        }
+                        await follow_ups_col.update_one(
+                            {"_id": fu_oid},
+                            {
+                                "$set": {
+                                    "status": "in_call",
+                                    "connected_at": conn_now,
+                                    "updated_at": conn_now
+                                },
+                                "$push": {"timeline": {"$each": [conn_timeline], "$position": 0}}
+                            }
+                        )
+                        await ws_manager.broadcast_global({
+                            "event": "FOLLOW_UP_IN_CALL",
+                            "type": "follow_up_in_call",
+                            "follow_up_id": str(active_call["follow_up_id"]),
+                            "id": str(active_call["follow_up_id"]),
+                            "call_id": str(active_call["_id"]),
+                            "status": "in_call",
+                            "timestamp": conn_now_iso
+                        })
+                except Exception as fue:
+                    logger.warning(f"[PLIVO ANSWER FOLLOW-UP] {fue}")
 
     # Broadcast real-time call connected status event to CRM frontend over WebSockets
     await ws_manager.broadcast_global({
@@ -723,6 +764,46 @@ async def plivo_status_callback(request: Request):
                     "dispositionStartedAt": now_iso,
                     "status": "WRAP_UP"
                 })
+                if active_call.get("follow_up_id"):
+                    try:
+                        fu_oid = _safe_oid(active_call["follow_up_id"])
+                        if fu_oid:
+                            wrap_timeline = {
+                                "id": f"evt_{uuid.uuid4().hex[:8]}",
+                                "timestamp": now_iso,
+                                "action": "CALL_WRAP_UP_STARTED",
+                                "description": f"Call #{str(active_call['_id'])[-6:].upper()} ended. Agent wrap-up and disposition started (Talk time: {talk_sec}s).",
+                                "actor": "Plivo Voice Bridge",
+                                "actor_role": "Telephony Provider",
+                                "metadata": {
+                                    "call_id": str(active_call["_id"]),
+                                    "talk_seconds": talk_sec
+                                }
+                            }
+                            await follow_ups_col.update_one(
+                                {"_id": fu_oid},
+                                {
+                                    "$set": {
+                                        "status": "wrap_up",
+                                        "wrap_up_started_at": now_utc,
+                                        "call_duration": talk_sec,
+                                        "updated_at": now_utc
+                                    },
+                                    "$push": {"timeline": {"$each": [wrap_timeline], "$position": 0}}
+                                }
+                            )
+                            await ws_manager.broadcast_global({
+                                "event": "FOLLOW_UP_WRAP_UP",
+                                "type": "follow_up_wrap_up",
+                                "follow_up_id": str(active_call["follow_up_id"]),
+                                "id": str(active_call["follow_up_id"]),
+                                "call_id": str(active_call["_id"]),
+                                "status": "wrap_up",
+                                "timestamp": now_iso
+                            })
+                    except Exception as fue:
+                        logger.warning(f"[PLIVO STATUS FOLLOW-UP] {fue}")
+
             elif mapped_status in ("busy", "failed", "no-answer", "canceled"):
                 await calls_col.update_one(
                     {"_id": active_call["_id"]},

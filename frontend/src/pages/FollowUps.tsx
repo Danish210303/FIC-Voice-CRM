@@ -12,6 +12,8 @@ import {
   Clock,
   CheckCircle2,
   AlertOctagon,
+  AlertTriangle,
+  Trash2,
   Phone,
   Search,
   RefreshCw,
@@ -48,6 +50,8 @@ export default function FollowUps() {
     fetchFollowUps,
     fetchStats,
     completeFollowUp,
+    cancelFollowUp,
+    deleteFollowUp,
     updateFollowUp,
     triggerAutoCall,
     reassignFollowUp,
@@ -56,13 +60,18 @@ export default function FollowUps() {
   const { showToast } = useToast();
   const navigate = useNavigate();
 
-  const [activeTab, setActiveTab] = useState<"all" | "due" | "upcoming" | "waiting" | "completed" | "missed">("all");
+  const [activeTab, setActiveTab] = useState<"all" | "due" | "upcoming" | "waiting" | "completed" | "missed" | "cancelled">("all");
   const [searchTerm, setSearchTerm] = useState("");
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
 
   // Timeline Modal State & Category Filter
   const [timelineModalItem, setTimelineModalItem] = useState<FollowUpItem | null>(null);
   const [timelineCategory, setTimelineCategory] = useState<"all" | "calls" | "assignments" | "status" | "followups">("all");
+
+  // Delete / Cancel Confirmation Modal State
+  const [deleteModalItem, setDeleteModalItem] = useState<FollowUpItem | null>(null);
+  const [cancelReason, setCancelReason] = useState("Customer requested cancellation");
+  const [isDeleting, setIsDeleting] = useState(false);
 
   // Close modals on Escape key press
   useEffect(() => {
@@ -72,6 +81,7 @@ export default function FollowUps() {
         setReassignModalItem(null);
         setRescheduleModalItem(null);
         setCompleteModalItem(null);
+        setDeleteModalItem(null);
       }
     };
     window.addEventListener("keydown", handleKeyDown);
@@ -189,6 +199,26 @@ export default function FollowUps() {
     await fetchFollowUps(activeTab, searchTerm);
   };
 
+  const handleConfirmDelete = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!deleteModalItem) return;
+    setIsDeleting(true);
+    try {
+      const targetId = deleteModalItem.id || deleteModalItem._id || deleteModalItem.follow_up_id || "";
+      const ok = await cancelFollowUp(targetId, cancelReason);
+      if (ok) {
+        setDeleteModalItem(null);
+        setCancelReason("Customer requested cancellation");
+        await fetchFollowUps(activeTab, searchTerm);
+        await fetchStats();
+      }
+    } catch (err: any) {
+      console.error("Failed to cancel follow up:", err);
+    } finally {
+      setIsDeleting(false);
+    }
+  };
+
   const formatDisplayDateTime = (dtStr?: string, formattedIst?: string) => {
     if (formattedIst && formattedIst !== "Not set") return formattedIst;
     if (!dtStr) return "Not set";
@@ -205,6 +235,7 @@ export default function FollowUps() {
       const diffMins = Math.round((target - now) / (1000 * 60));
 
       if (status === "completed") return "Completed";
+      if (status === "cancelled") return "Cancelled";
       if (status === "auto_calling") return "Auto-Calling Now";
       if (status === "waiting_for_agent") return "Waiting for Agent";
       if (status === "missed") {
@@ -268,6 +299,12 @@ export default function FollowUps() {
           bg: "bg-rose-50 text-rose-700 border-rose-300",
           dot: "bg-rose-500",
         };
+      case "cancelled":
+        return {
+          label: "Cancelled",
+          bg: "bg-slate-100 text-slate-600 border-slate-300",
+          dot: "bg-slate-400",
+        };
       case "scheduled":
       default:
         return {
@@ -286,6 +323,7 @@ export default function FollowUps() {
       if (activeTab === "waiting" && s !== "waiting_for_agent") return false;
       if (activeTab === "completed" && s !== "completed") return false;
       if (activeTab === "missed" && s !== "missed") return false;
+      if (activeTab === "cancelled" && s !== "cancelled") return false;
 
       if (!searchTerm) return true;
       const q = searchTerm.toLowerCase();
@@ -580,6 +618,11 @@ export default function FollowUps() {
               },
               { id: "completed", label: "Completed", count: stats.completed },
               { id: "missed", label: "Missed", count: stats.missed },
+              {
+                id: "cancelled",
+                label: "Cancelled",
+                count: stats.cancelled ?? followUps.filter((f) => f.status === "cancelled").length,
+              },
             ] as const
           ).map((t) => (
             <button
@@ -654,6 +697,7 @@ export default function FollowUps() {
                 const isAutoCalling = item.status === "auto_calling";
                 const isMissed = item.status === "missed";
                 const isCompleted = item.status === "completed";
+                const isCancelled = item.status === "cancelled";
                 const isReassigned =
                   item.original_agent_name &&
                   item.current_agent_name &&
@@ -677,6 +721,8 @@ export default function FollowUps() {
                         ? "bg-amber-50/30"
                         : isMissed
                         ? "bg-rose-50/20"
+                        : isCancelled
+                        ? "bg-slate-50/60 opacity-80"
                         : ""
                     }`}
                   >
@@ -733,6 +779,8 @@ export default function FollowUps() {
                               ? "bg-rose-100 text-rose-800 border border-rose-300"
                               : isCompleted
                               ? "bg-emerald-100 text-emerald-800 border border-emerald-200"
+                              : isCancelled
+                              ? "bg-slate-100 text-slate-700 border border-slate-300"
                               : "bg-blue-50 text-blue-800 border border-blue-200"
                           }`}
                         >
@@ -790,7 +838,7 @@ export default function FollowUps() {
                     <td className="py-3.5 px-4 align-middle text-right">
                       <div className="flex items-center justify-end gap-1.5">
                         {/* Auto-Call Trigger Button */}
-                        {!isCompleted && (
+                        {!isCompleted && !isCancelled && (
                           <button
                             onClick={() => handleTriggerAutoCall(item)}
                             disabled={callingId === item.id || isAutoCalling}
@@ -807,7 +855,7 @@ export default function FollowUps() {
                         )}
 
                         {/* Dial Softphone Button */}
-                        {!isCompleted && (
+                        {!isCompleted && !isCancelled && (
                           <button
                             onClick={() => handleDial(item)}
                             className="h-8 w-8 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 font-semibold flex items-center justify-center transition active:scale-95 cursor-pointer shadow-2xs"
@@ -827,7 +875,7 @@ export default function FollowUps() {
                         </button>
 
                         {/* Reassign Button */}
-                        {!isCompleted && (
+                        {!isCompleted && !isCancelled && (
                           <button
                             onClick={() => {
                               setReassignModalItem(item);
@@ -841,7 +889,7 @@ export default function FollowUps() {
                         )}
 
                         {/* Reschedule Button */}
-                        {!isCompleted && (
+                        {!isCompleted && !isCancelled && (
                           <button
                             onClick={() => {
                               setRescheduleModalItem(item);
@@ -857,13 +905,35 @@ export default function FollowUps() {
                         )}
 
                         {/* Complete Button */}
-                        {!isCompleted && (
+                        {!isCompleted && !isCancelled && (
                           <button
                             onClick={() => setCompleteModalItem(item)}
                             className="h-8 w-8 rounded-lg border border-emerald-200 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 font-semibold flex items-center justify-center transition active:scale-95 cursor-pointer shadow-2xs"
                             title="Mark Follow-Up Completed"
                           >
                             <Check className="h-3.5 w-3.5" />
+                          </button>
+                        )}
+
+                        {/* Safe Delete / Cancel Follow-Up Button (Available on Scheduled, Due, Missed, and Completed) */}
+                        {!isCancelled && !isAutoCalling && (
+                          <button
+                            onClick={() => {
+                              setDeleteModalItem(item);
+                              setCancelReason(
+                                item.status === "completed"
+                                  ? "Archived completed follow-up"
+                                  : "Customer requested cancellation"
+                              );
+                            }}
+                            className="h-8 w-8 rounded-lg border border-rose-200 bg-rose-50 hover:bg-rose-100 text-rose-600 font-semibold flex items-center justify-center transition active:scale-95 cursor-pointer shadow-2xs"
+                            title={
+                              item.status === "completed"
+                                ? "Delete / Archive Completed Follow-Up"
+                                : "Cancel / Delete Scheduled Callback (Safe Soft-Delete)"
+                            }
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
                           </button>
                         )}
                       </div>
@@ -1344,6 +1414,187 @@ export default function FollowUps() {
                   className="px-5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold"
                 >
                   Mark Completed
+                </button>
+              </div>
+            </form>
+          </motion.div>
+        </div>
+      )}
+
+      {/* ── 9. DELETE / CANCEL CONFIRMATION MODAL ── */}
+      {deleteModalItem && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs">
+          <motion.div
+            initial={{ opacity: 0, scale: 0.95, y: 8 }}
+            animate={{ opacity: 1, scale: 1, y: 0 }}
+            exit={{ opacity: 0, scale: 0.95, y: 8 }}
+            className="bg-white rounded-2xl shadow-2xl border border-slate-200 max-w-lg w-full p-6 space-y-4"
+          >
+            {/* Modal Header */}
+            <div className="flex items-start justify-between border-b border-slate-100 pb-3.5">
+              <div className="flex items-center gap-3">
+                <div className="h-10 w-10 rounded-xl bg-rose-50 text-rose-600 border border-rose-100 flex items-center justify-center shrink-0">
+                  <Trash2 className="h-5 w-5" />
+                </div>
+                <div>
+                  <h3 className="text-base font-extrabold text-slate-900">
+                    {deleteModalItem.status === "completed"
+                      ? "Archive / Delete Completed Record"
+                      : "Cancel Scheduled Follow-Up"}
+                  </h3>
+                  <p className="text-xs text-slate-500 font-medium mt-0.5">
+                    Safe soft-deletion with complete audit history retention
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => !isDeleting && setDeleteModalItem(null)}
+                disabled={isDeleting}
+                className="text-slate-400 hover:text-slate-600 p-1.5 rounded-lg hover:bg-slate-100 transition cursor-pointer disabled:opacity-50"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            {/* Warning Banner */}
+            <div className="p-3.5 rounded-xl bg-amber-50/90 border border-amber-200/80 flex items-start gap-3">
+              <AlertTriangle className="h-5 w-5 text-amber-600 shrink-0 mt-0.5" />
+              <div className="text-xs text-amber-900">
+                <p className="font-bold">
+                  {deleteModalItem.status === "completed"
+                    ? "Audit & Archive Notice"
+                    : "Automatic Call Cancellation Warning"}
+                </p>
+                <p className="text-amber-800/90 font-medium mt-0.5 leading-relaxed">
+                  {deleteModalItem.status === "completed"
+                    ? "Deleting this completed follow-up will archive it from active queue views. All call logs, recordings, notes, and timeline events will be safely preserved in the database and audit trail."
+                    : "Cancelling this follow-up will immediately prevent the backend auto-dialer from initiating outbound calls to this customer. The record and timeline will be archived as CANCELLED."}
+                </p>
+              </div>
+            </div>
+
+            {/* Target Item Details Card */}
+            <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200/80 space-y-2.5 text-xs">
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">Customer / Lead</span>
+                  <span className="font-bold text-slate-900 mt-0.5 block truncate">
+                    {deleteModalItem.customer_name || "Lead"}
+                  </span>
+                  <span className="font-mono font-medium text-slate-600 text-[11px] block mt-0.5">
+                    +91 {(deleteModalItem.customer_phone || deleteModalItem.phone_number || "").slice(-10)}
+                  </span>
+                </div>
+                <div>
+                  <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">Scheduled IST Time</span>
+                  <span className="font-bold text-blue-700 mt-0.5 block">
+                    {formatDisplayDateTime(
+                      deleteModalItem.scheduled_at || deleteModalItem.follow_up_datetime,
+                      deleteModalItem.formatted_ist || deleteModalItem.scheduled_at_ist
+                    )}
+                  </span>
+                  <span className="text-[10.5px] font-medium text-slate-500 block mt-0.5">
+                    Timezone: Asia/Kolkata (IST)
+                  </span>
+                </div>
+              </div>
+
+              <div className="pt-2 border-t border-slate-200/60 grid grid-cols-2 gap-3">
+                <div>
+                  <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">Assigned Agent</span>
+                  <span className="font-semibold text-slate-800 mt-0.5 block truncate">
+                    {deleteModalItem.current_agent_name || deleteModalItem.agent_name || "Unassigned"}
+                  </span>
+                </div>
+                <div>
+                  <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">Current Status</span>
+                  <span className="font-mono font-bold text-amber-700 uppercase mt-0.5 block text-[11px]">
+                    {deleteModalItem.status}
+                  </span>
+                </div>
+              </div>
+            </div>
+
+            {/* Cancellation Form */}
+            <form onSubmit={handleConfirmDelete} className="space-y-3.5 text-xs">
+              <div>
+                <label className="block font-bold text-slate-700 mb-1.5">
+                  Reason <span className="text-rose-500">*</span>
+                </label>
+                
+                {/* Preset Chips */}
+                <div className="flex flex-wrap gap-1.5 mb-2">
+                  {(deleteModalItem.status === "completed"
+                    ? [
+                        "Archived completed follow-up",
+                        "Clean up historical queue",
+                        "Duplicate completed record",
+                        "Customer issue resolved",
+                      ]
+                    : [
+                        "Customer requested cancellation",
+                        "Resolved on earlier call",
+                        "Duplicate follow-up scheduled",
+                        "Invalid contact number",
+                        "Customer not interested",
+                      ]
+                  ).map((preset) => (
+                    <button
+                      key={preset}
+                      type="button"
+                      onClick={() => setCancelReason(preset)}
+                      className={`px-2.5 py-1 rounded-lg text-[11px] font-medium transition cursor-pointer border ${
+                        cancelReason === preset
+                          ? "bg-blue-50 text-blue-700 border-blue-300 font-bold shadow-2xs"
+                          : "bg-white text-slate-600 border-slate-200 hover:border-slate-300 hover:bg-slate-50"
+                      }`}
+                    >
+                      {preset}
+                    </button>
+                  ))}
+                </div>
+
+                <textarea
+                  rows={2}
+                  required
+                  placeholder="Enter reason for deleting/archiving this follow-up..."
+                  value={cancelReason}
+                  onChange={(e) => setCancelReason(e.target.value)}
+                  className="w-full p-2.5 rounded-xl border border-slate-200 bg-slate-50 focus:bg-white focus:border-rose-500 focus:outline-none font-medium text-slate-900 text-xs"
+                />
+              </div>
+
+              {/* Action Buttons */}
+              <div className="pt-2.5 flex justify-end gap-2.5 border-t border-slate-100">
+                <button
+                  type="button"
+                  disabled={isDeleting}
+                  onClick={() => setDeleteModalItem(null)}
+                  className="px-4 py-2 rounded-xl text-slate-700 hover:bg-slate-100 font-bold transition cursor-pointer disabled:opacity-50"
+                >
+                  {deleteModalItem.status === "completed" ? "Keep in List" : "Keep Scheduled"}
+                </button>
+                <button
+                  type="submit"
+                  disabled={isDeleting || !cancelReason.trim()}
+                  className="px-4 py-2 rounded-xl bg-rose-600 hover:bg-rose-700 text-white font-bold flex items-center gap-2 shadow-sm transition active:scale-95 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {isDeleting ? (
+                    <>
+                      <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+                      <span>Processing...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Trash2 className="h-3.5 w-3.5" />
+                      <span>
+                        {deleteModalItem.status === "completed"
+                          ? "Delete / Archive Record"
+                          : "Cancel Follow-Up"}
+                      </span>
+                    </>
+                  )}
                 </button>
               </div>
             </form>

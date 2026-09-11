@@ -92,6 +92,7 @@ export interface FollowUpStats {
   due: number;
   completed: number;
   missed: number;
+  cancelled?: number;
   total: number;
 }
 
@@ -109,6 +110,8 @@ interface FollowUpContextType {
   triggerAutoCall: (id: string) => Promise<boolean>;
   reassignFollowUp: (id: string, agentId?: string, poolId?: string, notes?: string) => Promise<boolean>;
   snoozeFollowUp: (id: string, minutes?: number) => Promise<boolean>;
+  cancelFollowUp: (id: string, reason?: string) => Promise<boolean>;
+  deleteFollowUp: (id: string, reason?: string) => Promise<boolean>;
   dismissDueAlert: () => void;
 }
 
@@ -268,7 +271,12 @@ export function FollowUpProvider({ children }: { children: React.ReactNode }) {
       } else if (eventType === "FOLLOW_UP_MISSED") {
         fetchStats();
         fetchFollowUps();
-      } else if (eventType === "FOLLOW_UP_COMPLETED" || eventType === "FOLLOW_UP_UPDATED") {
+      } else if (
+        eventType === "FOLLOW_UP_COMPLETED" ||
+        eventType === "FOLLOW_UP_UPDATED" ||
+        eventType === "FOLLOW_UP_CANCELLED" ||
+        eventType === "FOLLOW_UP_DELETED"
+      ) {
         fetchStats();
         fetchFollowUps();
         if (activeDueFollowUp && (activeDueFollowUp.id === data.id || activeDueFollowUp.id === data.follow_up_id)) {
@@ -337,6 +345,50 @@ export function FollowUpProvider({ children }: { children: React.ReactNode }) {
       showToast(err.message || "Failed to complete follow-up", "error");
       return false;
     }
+  };
+
+  const cancelFollowUp = async (id: string, reason?: string): Promise<boolean> => {
+    try {
+      try {
+        await api.post(`/api/follow-ups/${id}/cancel`, {
+          reason: reason || "Cancelled by agent",
+          cancel_reason: reason || "Cancelled by agent",
+        });
+      } catch (postErr: any) {
+        // Fallback 1: Try DELETE endpoint
+        if (
+          postErr?.status === 404 ||
+          postErr?.message?.includes("404") ||
+          postErr?.message?.includes("Not Found")
+        ) {
+          try {
+            await api.delete(`/api/follow-ups/${id}`);
+          } catch (delErr: any) {
+            // Fallback 2: Try PATCH endpoint (supported in legacy backend)
+            await api.patch(`/api/follow-ups/${id}`, {
+              status: "cancelled",
+              reschedule_reason: reason || "Cancelled / Archived by agent",
+            });
+          }
+        } else {
+          throw postErr;
+        }
+      }
+      showToast("Follow-up archived / cancelled successfully", "success");
+      if (activeDueFollowUp && activeDueFollowUp.id === id) {
+        setActiveDueFollowUp(null);
+      }
+      await fetchStats();
+      await fetchFollowUps();
+      return true;
+    } catch (err: any) {
+      showToast(err.message || "Failed to delete/cancel follow-up", "error");
+      return false;
+    }
+  };
+
+  const deleteFollowUp = async (id: string, reason?: string): Promise<boolean> => {
+    return cancelFollowUp(id, reason);
   };
 
   const triggerAutoCall = async (id: string): Promise<boolean> => {
@@ -411,6 +463,8 @@ export function FollowUpProvider({ children }: { children: React.ReactNode }) {
         createFollowUp,
         updateFollowUp,
         completeFollowUp,
+        cancelFollowUp,
+        deleteFollowUp,
         triggerAutoCall,
         reassignFollowUp,
         snoozeFollowUp,

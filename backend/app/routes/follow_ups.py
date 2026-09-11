@@ -31,6 +31,11 @@ class ReassignPayload(BaseModel):
     notes: Optional[str] = None
 
 
+class CancelPayload(BaseModel):
+    reason: Optional[str] = None
+    cancel_reason: Optional[str] = None
+
+
 def _safe_oid(oid_val: str | None) -> ObjectId | None:
     if oid_val and isinstance(oid_val, str) and ObjectId.is_valid(oid_val):
         return ObjectId(oid_val)
@@ -66,6 +71,9 @@ def serialize_follow_up(fu: Dict[str, Any]) -> Dict[str, Any]:
 
     missed_at = fu.get("missed_at")
     missed_at_iso = missed_at.isoformat() if isinstance(missed_at, datetime) else (str(missed_at) if missed_at else None)
+
+    cancelled_at = fu.get("cancelled_at")
+    cancelled_at_iso = cancelled_at.isoformat() if isinstance(cancelled_at, datetime) else (str(cancelled_at) if cancelled_at else None)
 
     # Resolve agent names
     orig_agent_id = str(fu.get("original_agent_id") or fu.get("assigned_agent_id") or fu.get("agent_id") or "")
@@ -117,6 +125,10 @@ def serialize_follow_up(fu: Dict[str, Any]) -> Dict[str, Any]:
         "created_at": created_at_iso,
         "completed_at": completed_at_iso if completed_at else None,
         "missed_at": missed_at_iso,
+        "cancelled_at": cancelled_at_iso,
+        "cancelled_by": fu.get("cancelled_by"),
+        "cancelled_by_name": fu.get("cancelled_by_name"),
+        "cancel_reason": fu.get("cancel_reason"),
     }
 
 
@@ -299,13 +311,15 @@ async def list_follow_ups(
         if s_clean in ["upcoming", "scheduled"]:
             query["status"] = "scheduled"
         elif s_clean in ["due", "due_now"]:
-            query["status"] = {"$in": ["due", "waiting_for_agent", "auto_calling"]}
+            query["status"] = {"$in": ["due", "waiting_for_agent", "auto_calling", "ringing"]}
         elif s_clean == "waiting":
             query["status"] = "waiting_for_agent"
         elif s_clean == "completed":
             query["status"] = "completed"
         elif s_clean == "missed":
             query["status"] = "missed"
+        elif s_clean in ["cancelled", "canceled"]:
+            query["status"] = "cancelled"
         elif s_clean != "all":
             query["status"] = s_clean
 
@@ -371,9 +385,10 @@ async def get_follow_up_stats(
     """
     Returns BPO Follow-Up KPI statistics for dashboard metric cards:
     - upcoming (Scheduled for future)
-    - due (Due right now / auto_calling / waiting)
+    - due (Due right now / auto_calling / waiting / ringing)
     - completed (Successfully linked/completed)
     - missed (Overdue / missed window)
+    - cancelled (Cancelled scheduled callbacks)
     """
     now = utcnow()
     user_role = str(current_user.get("role", "agent")).lower()
@@ -394,7 +409,7 @@ async def get_follow_up_stats(
     })
     due_count = await follow_ups_col.count_documents({
         **base_query,
-        "status": {"$in": ["due", "waiting_for_agent", "auto_calling"]}
+        "status": {"$in": ["due", "waiting_for_agent", "auto_calling", "ringing"]}
     })
     completed_count = await follow_ups_col.count_documents({
         **base_query,
@@ -403,6 +418,10 @@ async def get_follow_up_stats(
     missed_count = await follow_ups_col.count_documents({
         **base_query,
         "status": "missed"
+    })
+    cancelled_count = await follow_ups_col.count_documents({
+        **base_query,
+        "status": "cancelled"
     })
     total_kpi = upcoming_count + due_count + completed_count + missed_count
 
@@ -415,13 +434,15 @@ async def get_follow_up_stats(
             "due_now": due_count,
             "completed": completed_count,
             "missed": missed_count,
+            "cancelled": cancelled_count,
         },
         "total": total_kpi,
         "upcoming": upcoming_count,
         "due": due_count,
         "due_now": due_count,
         "completed": completed_count,
-        "missed": missed_count
+        "missed": missed_count,
+        "cancelled": cancelled_count
     }
 
 
@@ -714,30 +735,135 @@ async def mark_follow_up_completed(
     return serialized
 
 
-@router.delete("/{id}", dependencies=[Depends(require_roles(Role.ADMIN, Role.TEAM_LEADER, "admin", "team_leader"))])
-async def delete_follow_up(
+@router.delete("/{id}")
+@router.post("/{id}/cancel")
+async def cancel_or_delete_follow_up(
     id: str,
+    payload: Optional[CancelPayload] = Body(None),
+    cancel_reason: Optional[str] = Query(None),
     current_user: dict = Depends(get_current_user)
 ):
-    """Deletes a follow-up reminder."""
+    """
+    Soft-deletes / cancels a scheduled follow-up reminder.
+    Transitions status -> 'cancelled' and appends FOLLOW_UP_CANCELLED timeline event.
+    Stops automatic scheduled callbacks from triggering.
+    Preserves audit history in MongoDB.
+    """
     oid = _safe_oid(id)
     doc = await follow_ups_col.find_one({"$or": [{"_id": oid}, {"id": id}]}) if (oid or id) else None
     if not doc:
         raise HTTPException(status_code=404, detail="Follow-Up record not found")
 
-    await follow_ups_col.delete_one({"_id": doc["_id"]})
+    if doc.get("status") == "in_call":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cannot delete or cancel follow-up that is currently in an active live call."
+        )
+
+    now = utcnow()
+    actor_name = current_user.get("name") or "Agent"
+    actor_role = str(current_user.get("role", "Agent")).title()
+
+    reason_str = (
+        (payload.reason if payload and payload.reason else None)
+        or (payload.cancel_reason if payload and payload.cancel_reason else None)
+        or cancel_reason
+        or "Deleted / Cancelled by user"
+    )
+
+    prev_status = doc.get("status") or "scheduled"
+    if prev_status == "completed":
+        action_name = "FOLLOW_UP_DELETED"
+        desc = f"Completed follow-up archived/deleted by {actor_name} ({reason_str}). Audit history retained."
+    else:
+        action_name = "FOLLOW_UP_CANCELLED"
+        desc = f"Scheduled callback cancelled by {actor_name} ({reason_str}). Automatic callback stopped."
+
+    cancel_timeline = {
+        "id": f"evt_{uuid.uuid4().hex[:8]}",
+        "timestamp": now.isoformat(),
+        "action": action_name,
+        "description": desc,
+        "actor": actor_name,
+        "actor_role": actor_role,
+        "metadata": {
+            "cancelled_by": str(current_user.get("_id") or current_user.get("id")),
+            "cancel_reason": reason_str,
+            "previous_status": prev_status
+        }
+    }
+
+    update_fields = {
+        "status": "cancelled",
+        "cancelled_at": now,
+        "cancelled_by": str(current_user.get("_id") or current_user.get("id")),
+        "cancelled_by_name": actor_name,
+        "cancel_reason": reason_str,
+        "is_locked": False,
+        "lock_timestamp": None,
+        "updated_at": now
+    }
+
+    await follow_ups_col.update_one(
+        {"_id": doc["_id"]},
+        {
+            "$set": update_fields,
+            "$push": {"timeline": {"$each": [cancel_timeline], "$position": 0}}
+        }
+    )
+
+    # If linked to a lead whose follow_up_id points to this, update lead note
+    lead_id = doc.get("lead_id") or doc.get("customer_id")
+    if lead_id and ObjectId.is_valid(lead_id):
+        try:
+            await leads_col.update_one(
+                {"_id": ObjectId(lead_id), "follow_up_id": str(doc["_id"])},
+                {"$set": {
+                    "last_note": f"Scheduled callback cancelled: {reason_str}",
+                    "updated_at": now
+                }}
+            )
+        except Exception:
+            pass
+
     await audit_logs_col.insert_one({
-        "action": "delete_follow_up",
+        "action": "cancel_follow_up",
         "follow_up_id": str(doc["_id"]),
         "user_id": str(current_user.get("_id") or current_user.get("id")),
-        "timestamp": utcnow()
+        "reason": reason_str,
+        "timestamp": now
     })
 
+    updated_doc = await follow_ups_col.find_one({"_id": doc["_id"]})
+    serialized = serialize_follow_up(updated_doc)
+
+    await ws_manager.broadcast_global({
+        "event": "FOLLOW_UP_CANCELLED",
+        "type": "follow_up_cancelled",
+        "follow_up": serialized,
+        "id": str(doc["_id"]),
+        "status": "cancelled",
+        "timestamp": now.isoformat()
+    })
     await ws_manager.broadcast_global({
         "event": "FOLLOW_UP_DELETED",
         "type": "follow_up_deleted",
         "id": str(doc["_id"]),
-        "timestamp": utcnow().isoformat()
+        "status": "cancelled",
+        "timestamp": now.isoformat()
+    })
+    await ws_manager.broadcast_global({
+        "event": "FOLLOW_UP_UPDATED",
+        "type": "follow_up_updated",
+        "follow_up": serialized,
+        "id": str(doc["_id"]),
+        "status": "cancelled",
+        "timestamp": now.isoformat()
     })
 
-    return {"success": True, "message": "Follow-Up deleted successfully", "id": str(doc["_id"])}
+    return {
+        "success": True,
+        "message": f"Scheduled callback for {doc.get('customer_name')} cancelled successfully",
+        "follow_up": serialized,
+        "id": str(doc["_id"])
+    }
